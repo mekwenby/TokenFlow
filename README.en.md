@@ -4,6 +4,12 @@
 
 TokenFlow is a Go 1.21 LLM gateway that exposes OpenAI-compatible and Anthropic-compatible public APIs. It supports SQLite persistence, encrypted upstream provider keys, model routing, SSE streaming conversion, request usage logging, and an embedded admin UI.
 
+## Screenshots
+
+![TokenFlow admin dashboard](images/1.webp)
+
+![TokenFlow model token details](images/2.webp)
+
 ## Features
 
 - OpenAI-compatible `POST /v1/chat/completions`.

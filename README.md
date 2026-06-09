@@ -4,6 +4,12 @@
 
 TokenFlow 是一个基于 Go 1.21 的 LLM 网关，对外提供兼容 OpenAI 和 Anthropic 的 API。它支持 SQLite 持久化、上游供应商密钥加密、模型路由、SSE 流式转换、请求用量日志，以及内嵌管理后台。
 
+## 界面预览
+
+![TokenFlow 管理后台概览](images/1.webp)
+
+![TokenFlow 模型 Token 明细](images/2.webp)
+
 ## 功能
 
 - 兼容 OpenAI 的 `POST /v1/chat/completions`。
