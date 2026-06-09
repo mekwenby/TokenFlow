@@ -1,0 +1,12 @@
+services:
+  tokenflow:
+    build: .
+    container_name: tokenflow
+    restart: unless-stopped
+    ports:
+      - "8019:8019"
+    volumes:
+      - ./data:/app/data
+    environment:
+      GATEWAY_ADDR: ":8019"
+      GATEWAY_DATA_DIR: "/app/data"

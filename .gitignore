@@ -1,0 +1,26 @@
+# Local runtime data
+data/
+
+# Build artifacts
+dist/
+build/
+coverage/
+tokenflow
+tokenflow.exe
+
+# Dependencies and caches
+node_modules/
+__pycache__/
+*.pyc
+
+# Editor files
+.idea/
+.vscode/
+
+# Environment files
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db
