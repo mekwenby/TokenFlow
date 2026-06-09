@@ -13,10 +13,10 @@ const i18n = window.__ADMIN_I18N__ || {};
 const t = (key) => i18n[key] || key;
 const csrf = () => document.cookie.split("; ").find((row) => row.startsWith("gateway_csrf="))?.split("=")[1] || "";
 const tokenUsageSeries = [
-  { key: "input_tokens", labelKey: "input_tokens", color: "#2563eb" },
-  { key: "output_tokens", labelKey: "output_tokens", color: "#16a34a" },
-  { key: "cache_read_tokens", labelKey: "cache_read_tokens", color: "#9333ea" },
-  { key: "cache_creation_tokens", labelKey: "cache_creation_tokens", color: "#ea580c" },
+  { key: "input_tokens", labelKey: "input_tokens", color: "#2457c5" },
+  { key: "output_tokens", labelKey: "output_tokens", color: "#0f8f87" },
+  { key: "cache_read_tokens", labelKey: "cache_read_tokens", color: "#7c3aed" },
+  { key: "cache_creation_tokens", labelKey: "cache_creation_tokens", color: "#b45309" },
 ];
 
 async function api(path, options = {}) {
@@ -74,8 +74,55 @@ function statusIndicator(on) {
   return `<span class="status-pill ${on ? "" : "off"}" title="${esc(label)}" aria-label="${esc(label)}"><span></span>${esc(label)}</span>`;
 }
 
-function iconActionButton(action, value, label, emoji, tone = "secondary") {
-  return `<button class="${tone} action-icon" data-${action}="${esc(value)}" title="${esc(label)}" aria-label="${esc(label)}">${emoji}</button>`;
+function icon(name) {
+  return `<svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-${name}"></use></svg>`;
+}
+
+function iconActionButton(action, value, label, iconName, tone = "secondary") {
+  return `<button type="button" class="${tone} action-icon" data-${action}="${esc(value)}" title="${esc(label)}" aria-label="${esc(label)}">${icon(iconName)}</button>`;
+}
+
+function copyButton(value, label = t("copy")) {
+  return `<button type="button" class="secondary action-icon copy-button" data-copy="${esc(value)}" title="${esc(label)}" aria-label="${esc(label)}">${icon("copy")}</button>`;
+}
+
+function showToast(message) {
+  let toast = document.querySelector("#toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "toast";
+    toast.className = "toast";
+    toast.setAttribute("role", "status");
+    toast.setAttribute("aria-live", "polite");
+    document.body.appendChild(toast);
+  }
+  toast.textContent = message;
+  toast.classList.add("visible");
+  clearTimeout(showToast.timer);
+  showToast.timer = setTimeout(() => toast.classList.remove("visible"), 1800);
+}
+
+async function copyText(value) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const input = document.createElement("textarea");
+  input.value = value;
+  input.setAttribute("readonly", "");
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.appendChild(input);
+  input.select();
+  document.execCommand("copy");
+  input.remove();
+}
+
+function renderNewKey(plainKey) {
+  const banner = document.querySelector("#new-key");
+  if (!banner) return;
+  banner.innerHTML = `<span>${esc(t("new_key"))}</span><code>${esc(plainKey)}</code>${copyButton(plainKey)}`;
+  banner.classList.remove("hidden");
 }
 
 async function loadAll() {
@@ -120,7 +167,11 @@ function renderAPIAddresses() {
     [t("anthropic_messages"), `${origin}/v1/messages`],
     [t("anthropic_models"), `${origin}/anthropic/v1/models`],
     [t("legacy_anthropic"), `${origin}/anthropic/v1/messages`],
-  ].map(([label, value]) => `<div class="api-item"><span>${label}</span><code>${esc(value)}</code></div>`).join("");
+  ].map(([label, value]) => `
+    <div class="api-item">
+      <div class="api-item-head"><span>${esc(label)}</span>${copyButton(value)}</div>
+      <code>${esc(value)}</code>
+    </div>`).join("");
 }
 
 function renderStats(stats) {
@@ -413,9 +464,9 @@ function renderProviders() {
           <td>${formatToken(p.output_tokens)}</td>
           <td>${formatToken(p.cache_read_tokens)}</td>
           <td class="actions">
-            ${iconActionButton("detail-provider", p.id, t("details"), "📊")}
-            ${iconActionButton("edit-provider", p.id, t("edit"), "✏️")}
-            ${iconActionButton("delete-provider", p.id, t("delete"), "🗑️", "danger")}
+            ${iconActionButton("detail-provider", p.id, t("details"), "chart")}
+            ${iconActionButton("edit-provider", p.id, t("edit"), "edit")}
+            ${iconActionButton("delete-provider", p.id, t("delete"), "trash", "danger")}
           </td>
         </tr>`).join("")}</tbody>
     </table>`;
@@ -435,8 +486,8 @@ function renderMappings() {
           <td>${esc(m.provider_name)}</td>
           <td>${esc(m.upstream_model)}</td>
           <td class="actions">
-            ${iconActionButton("edit-mapping", m.id, t("edit"), "✏️")}
-            ${iconActionButton("delete-mapping", m.id, t("delete"), "🗑️", "danger")}
+            ${iconActionButton("edit-mapping", m.id, t("edit"), "edit")}
+            ${iconActionButton("delete-mapping", m.id, t("delete"), "trash", "danger")}
           </td>
         </tr>`).join("")}</tbody>
     </table>`;
@@ -461,11 +512,11 @@ function renderKeys() {
           <td>${formatToken(k.output_tokens)}</td>
           <td>${date(k.last_used_at)}</td>
           <td class="actions">
-            ${iconActionButton("detail-key", k.id, t("details"), "📊")}
-            ${iconActionButton("edit-key", k.id, t("edit"), "✏️")}
-            ${iconActionButton("reset-key", k.id, t("reset_key"), "🔄")}
-            ${iconActionButton("reset-key-stats", k.id, t("reset_key_stats"), "🧹")}
-            ${iconActionButton("delete-key", k.id, t("delete"), "🗑️", "danger")}
+            ${iconActionButton("detail-key", k.id, t("details"), "chart")}
+            ${iconActionButton("edit-key", k.id, t("edit"), "edit")}
+            ${iconActionButton("reset-key", k.id, t("reset_key"), "refresh")}
+            ${iconActionButton("reset-key-stats", k.id, t("reset_key_stats"), "reset")}
+            ${iconActionButton("delete-key", k.id, t("delete"), "trash", "danger")}
           </td>
         </tr>`).join("")}</tbody>
     </table>`;
@@ -530,6 +581,7 @@ function openForm(id) {
   form.classList.remove("hidden");
   if (id === "key-form") {
     form.querySelector(".key-enabled").classList.add("hidden");
+    document.querySelector("#new-key")?.classList.add("hidden");
   }
 }
 
@@ -550,9 +602,20 @@ function splitModels(value) {
 }
 
 document.addEventListener("click", async (event) => {
-  const target = event.target;
-  if (target.matches("[data-close-detail]") || target.id === "detail-modal") {
+  const eventTarget = event.target;
+  if (!(eventTarget instanceof Element)) return;
+  const target = eventTarget.closest("button, [data-close-detail]") || eventTarget;
+  if (target.matches("[data-close-detail]") || eventTarget.id === "detail-modal") {
     closeModelDetails();
+    return;
+  }
+  if (target.matches("[data-copy]")) {
+    try {
+      await copyText(target.dataset.copy || "");
+      showToast(t("copied"));
+    } catch (error) {
+      alert(error.message || t("request_failed"));
+    }
     return;
   }
   if (target.matches("[data-clear-logs-search]")) {
@@ -622,9 +685,7 @@ document.addEventListener("click", async (event) => {
   if (target.matches("[data-reset-key]") && confirm(t("reset_key_confirm"))) {
     const key = await api("/admin/api/keys/reset", { method: "POST", body: JSON.stringify({ id: Number(target.dataset.resetKey || 0) }) });
     if (key.plain_key) {
-      const banner = document.querySelector("#new-key");
-      banner.textContent = `${t("new_key")}: ${key.plain_key}`;
-      banner.classList.remove("hidden");
+      renderNewKey(key.plain_key);
     }
     await loadAll();
   }
@@ -690,9 +751,7 @@ document.querySelector("#key-form").addEventListener("submit", async (event) => 
   const method = data.id ? "PUT" : "POST";
   const key = await api("/admin/api/keys", { method, body: JSON.stringify(data) });
   if (key.plain_key) {
-    const banner = document.querySelector("#new-key");
-    banner.textContent = `${t("new_key")}: ${key.plain_key}`;
-    banner.classList.remove("hidden");
+    renderNewKey(key.plain_key);
   }
   closeForm(form);
   await loadAll();

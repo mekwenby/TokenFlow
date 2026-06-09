@@ -589,13 +589,20 @@ const templates = `
   <link rel="icon" href="/admin/static/tokenflow-logo.svg">
   <link rel="stylesheet" href="/admin/static/style.css">
 </head>
-<body>
+<body class="admin-page">
   <header class="topbar">
-    <h1 class="brand"><img src="/admin/static/tokenflow-logo.svg" alt="" aria-hidden="true"><span>{{tr .Lang "app.title"}}</span></h1>
-    <div class="top-actions">
-      {{template "lang_switch" .}}
-      <span>{{.Username}}</span>
-      <form method="post" action="/admin/logout"><button type="submit">{{tr .Lang "logout"}}</button></form>
+    <div class="topbar-inner">
+      <h1 class="brand"><img src="/admin/static/tokenflow-logo.svg" alt="" aria-hidden="true"><span>{{tr .Lang "app.title"}}</span></h1>
+      <div class="top-actions">
+        {{template "lang_switch" .}}
+        <span class="user-chip" title="{{.Username}}">{{.Username}}</span>
+        <form method="post" action="/admin/logout">
+          <button type="submit" class="secondary icon-label">
+            <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-log-out"></use></svg>
+            <span>{{tr .Lang "logout"}}</span>
+          </button>
+        </form>
+      </div>
     </div>
   </header>
   <main class="layout">
@@ -618,7 +625,13 @@ const templates = `
       <div id="api-addresses" class="api-grid"></div>
     </section>
     <section class="panel">
-      <div class="section-head"><h2>{{tr .Lang "providers"}}</h2><button data-open="provider-form">{{tr .Lang "add_provider"}}</button></div>
+      <div class="section-head">
+        <h2>{{tr .Lang "providers"}}</h2>
+        <button type="button" class="icon-label" data-open="provider-form">
+          <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-add"></use></svg>
+          <span>{{tr .Lang "add_provider"}}</span>
+        </button>
+      </div>
       <form id="provider-form" class="editor hidden">
         <input type="hidden" name="id">
         <label>{{tr .Lang "name"}}<input name="name" required></label>
@@ -629,28 +642,40 @@ const templates = `
         <label class="wide">{{tr .Lang "supported_models"}}<textarea name="models" rows="4" placeholder="{{tr .Lang "models_placeholder"}}"></textarea></label>
         <label class="check"><input name="enabled" type="checkbox" checked> {{tr .Lang "enabled"}}</label>
         <label class="check"><input name="is_default" type="checkbox"> {{tr .Lang "default"}}</label>
-        <div class="row-actions"><button type="submit">{{tr .Lang "save"}}</button><button type="button" data-cancel>{{tr .Lang "cancel"}}</button></div>
+        <div class="row-actions"><button type="submit">{{tr .Lang "save"}}</button><button type="button" class="secondary" data-cancel>{{tr .Lang "cancel"}}</button></div>
       </form>
       <div id="providers" class="table-wrap"></div>
     </section>
     <section class="panel">
-      <div class="section-head"><h2>{{tr .Lang "model_mappings"}}</h2><button data-open="mapping-form">{{tr .Lang "add_mapping"}}</button></div>
+      <div class="section-head">
+        <h2>{{tr .Lang "model_mappings"}}</h2>
+        <button type="button" class="icon-label" data-open="mapping-form">
+          <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-add"></use></svg>
+          <span>{{tr .Lang "add_mapping"}}</span>
+        </button>
+      </div>
       <form id="mapping-form" class="editor hidden">
         <input type="hidden" name="id">
         <label>{{tr .Lang "client_model"}}<input name="client_model" required></label>
         <label>{{tr .Lang "provider"}}<select name="provider_id" required></select></label>
         <label>{{tr .Lang "upstream_model"}}<input name="upstream_model" required></label>
-        <div class="row-actions"><button type="submit">{{tr .Lang "save"}}</button><button type="button" data-cancel>{{tr .Lang "cancel"}}</button></div>
+        <div class="row-actions"><button type="submit">{{tr .Lang "save"}}</button><button type="button" class="secondary" data-cancel>{{tr .Lang "cancel"}}</button></div>
       </form>
       <div id="mappings" class="table-wrap"></div>
     </section>
     <section class="panel">
-      <div class="section-head"><h2>{{tr .Lang "distribution_keys"}}</h2><button data-open="key-form">{{tr .Lang "create_key"}}</button></div>
+      <div class="section-head">
+        <h2>{{tr .Lang "distribution_keys"}}</h2>
+        <button type="button" class="icon-label" data-open="key-form">
+          <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-add"></use></svg>
+          <span>{{tr .Lang "create_key"}}</span>
+        </button>
+      </div>
       <form id="key-form" class="editor hidden">
         <input type="hidden" name="id">
         <label>{{tr .Lang "name"}}<input name="name" required></label>
         <label class="check key-enabled hidden"><input name="enabled" type="checkbox" checked> {{tr .Lang "enabled"}}</label>
-        <div class="row-actions"><button type="submit">{{tr .Lang "save"}}</button><button type="button" data-cancel>{{tr .Lang "cancel"}}</button></div>
+        <div class="row-actions"><button type="submit">{{tr .Lang "save"}}</button><button type="button" class="secondary" data-cancel>{{tr .Lang "cancel"}}</button></div>
       </form>
       <p id="new-key" class="secret hidden"></p>
       <div id="keys" class="table-wrap"></div>
@@ -660,8 +685,12 @@ const templates = `
         <h2>{{tr .Lang "recent_requests"}}</h2>
         <form id="logs-search-form" class="logs-search">
           <input name="q" type="search" placeholder="{{tr .Lang "logs_search_placeholder"}}" aria-label="{{tr .Lang "logs_search"}}">
-          <button type="submit" title="{{tr .Lang "logs_search"}}" aria-label="{{tr .Lang "logs_search"}}">🔍</button>
-          <button type="button" class="secondary" data-clear-logs-search title="{{tr .Lang "clear"}}" aria-label="{{tr .Lang "clear"}}">✕</button>
+          <button type="submit" class="action-icon" title="{{tr .Lang "logs_search"}}" aria-label="{{tr .Lang "logs_search"}}">
+            <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-search"></use></svg>
+          </button>
+          <button type="button" class="secondary action-icon" data-clear-logs-search title="{{tr .Lang "clear"}}" aria-label="{{tr .Lang "clear"}}">
+            <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-close"></use></svg>
+          </button>
         </form>
       </div>
       <div id="logs" class="table-wrap"></div>
@@ -674,7 +703,10 @@ const templates = `
           <h2 id="detail-modal-title">{{tr .Lang "model_token_details"}}</h2>
           <p id="detail-modal-subtitle"></p>
         </div>
-        <button type="button" class="secondary" data-close-detail>{{tr .Lang "close"}}</button>
+        <button type="button" class="secondary icon-label" data-close-detail>
+          <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-close"></use></svg>
+          <span>{{tr .Lang "close"}}</span>
+        </button>
       </div>
       <div id="detail-modal-body"></div>
     </div>
