@@ -2,6 +2,7 @@ const state = {
   providers: [],
   mappings: [],
   keys: [],
+  users: [],
   logsLimit: 50,
   logsOffset: 0,
   logsTotal: 0,
@@ -9,9 +10,14 @@ const state = {
   tokenUsageRange: "24h",
 };
 
+const ui = window.TokenFlowUI;
 const i18n = window.__ADMIN_I18N__ || {};
 const t = (key) => i18n[key] || key;
-const csrf = () => document.cookie.split("; ").find((row) => row.startsWith("gateway_csrf="))?.split("=")[1] || "";
+const csrf = () => ui.cookie("gateway_csrf");
+const esc = ui.esc;
+const date = ui.date;
+const percent = ui.percent;
+const formatToken = ui.formatToken;
 const tokenUsageSeries = [
   { key: "input_tokens", labelKey: "input_tokens", color: "#2457c5" },
   { key: "output_tokens", labelKey: "output_tokens", color: "#0f8f87" },
@@ -20,102 +26,36 @@ const tokenUsageSeries = [
 ];
 
 async function api(path, options = {}) {
-  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
-  if (options.method && options.method !== "GET") {
-    headers["X-CSRF-Token"] = csrf();
-  }
-  const response = await fetch(path, { ...options, headers });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(body.error || t("request_failed"));
-  }
-  return body;
+  return ui.api(path, options, { csrf: csrf(), defaultError: t("request_failed") });
 }
 
-function esc(value) {
-  return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  })[ch]);
+function icon(name) {
+  return ui.icon(name);
 }
 
-function date(value) {
-  if (!value) return "";
-  return new Date(value).toLocaleString();
+function iconActionButton(action, value, label, iconName, tone = "secondary") {
+  return ui.iconActionButton(action, value, label, iconName, tone);
 }
 
-function percent(value, fallback = "-") {
-  const number = Number(value || 0);
-  if (!Number.isFinite(number) || number <= 0) return fallback;
-  return `${(number * 100).toFixed(1)}%`;
+function copyButton(value, label = t("copy")) {
+  return ui.copyButton(value, label);
 }
 
-function formatToken(value) {
-  const number = Number(value || 0);
-  if (!Number.isFinite(number) || number < 1000) return String(Math.max(0, Math.trunc(number || 0)));
-  const units = [
-    [1000000000, "B"],
-    [1000000, "M"],
-    [1000, "K"],
-  ];
-  const [divisor, suffix] = units.find(([base]) => number >= base);
-  return `${(number / divisor).toFixed(1).replace(/\.0$/, "")}${suffix}`;
+function showError(error) {
+  ui.showToast(error?.message || t("request_failed"), "error");
 }
 
-function badge(on, yes = t("enabled"), no = t("disabled")) {
-  return `<span class="badge ${on ? "" : "off"}">${on ? yes : no}</span>`;
+function setLoading(selector) {
+  ui.setRegionLoading(selector, t("loading"));
+}
+
+function setError(selector, error) {
+  ui.setRegionError(selector, error?.message || error || t("request_failed"));
 }
 
 function statusIndicator(on) {
   const label = on ? t("enabled") : t("disabled");
   return `<span class="status-pill ${on ? "" : "off"}" title="${esc(label)}" aria-label="${esc(label)}"><span></span>${esc(label)}</span>`;
-}
-
-function icon(name) {
-  return `<svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-${name}"></use></svg>`;
-}
-
-function iconActionButton(action, value, label, iconName, tone = "secondary") {
-  return `<button type="button" class="${tone} action-icon" data-${action}="${esc(value)}" title="${esc(label)}" aria-label="${esc(label)}">${icon(iconName)}</button>`;
-}
-
-function copyButton(value, label = t("copy")) {
-  return `<button type="button" class="secondary action-icon copy-button" data-copy="${esc(value)}" title="${esc(label)}" aria-label="${esc(label)}">${icon("copy")}</button>`;
-}
-
-function showToast(message) {
-  let toast = document.querySelector("#toast");
-  if (!toast) {
-    toast = document.createElement("div");
-    toast.id = "toast";
-    toast.className = "toast";
-    toast.setAttribute("role", "status");
-    toast.setAttribute("aria-live", "polite");
-    document.body.appendChild(toast);
-  }
-  toast.textContent = message;
-  toast.classList.add("visible");
-  clearTimeout(showToast.timer);
-  showToast.timer = setTimeout(() => toast.classList.remove("visible"), 1800);
-}
-
-async function copyText(value) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(value);
-    return;
-  }
-  const input = document.createElement("textarea");
-  input.value = value;
-  input.setAttribute("readonly", "");
-  input.style.position = "fixed";
-  input.style.opacity = "0";
-  document.body.appendChild(input);
-  input.select();
-  document.execCommand("copy");
-  input.remove();
 }
 
 function renderNewKey(plainKey) {
@@ -126,41 +66,60 @@ function renderNewKey(plainKey) {
 }
 
 async function loadAll() {
-  const [stats, tokenUsage, providers, mappings, keys] = await Promise.all([
-    api("/admin/api/stats"),
-    fetchTokenUsage(),
-    api("/admin/api/providers"),
-    api("/admin/api/model-mappings"),
-    api("/admin/api/keys"),
-  ]);
-  state.providers = providers || [];
-  state.mappings = mappings || [];
-  state.keys = keys || [];
-  renderStats(stats);
-  renderTokenUsage(tokenUsage);
   renderAPIAddresses();
-  renderProviders();
-  renderMappings();
-  renderKeys();
+  for (const selector of ["#stats", "#token-usage", "#users", "#providers", "#mappings", "#keys"]) {
+    setLoading(selector);
+  }
+
+  const tasks = [
+    { name: "stats", selector: "#stats", promise: api("/admin/api/stats"), success: renderStats },
+    { name: "tokenUsage", selector: "#token-usage", promise: fetchTokenUsage(), success: renderTokenUsage },
+    { name: "providers", selector: "#providers", promise: api("/admin/api/providers"), success: (providers) => { state.providers = providers || []; renderProviders(); } },
+    { name: "mappings", selector: "#mappings", promise: api("/admin/api/model-mappings"), success: (mappings) => { state.mappings = mappings || []; renderMappings(); } },
+    { name: "keys", selector: "#keys", promise: api("/admin/api/keys"), success: (keys) => { state.keys = keys || []; renderKeys(); } },
+    { name: "users", selector: "#users", promise: api("/admin/api/users"), success: (users) => { state.users = users || []; renderUsers(); } },
+  ];
+  const results = await Promise.allSettled(tasks.map((task) => task.promise));
+  results.forEach((result, index) => {
+    const task = tasks[index];
+    if (result.status === "fulfilled") {
+      task.success(result.value);
+      ui.clearRegionBusy(task.selector);
+      return;
+    }
+    if (task.name === "providers") state.providers = [];
+    if (task.name === "mappings") state.mappings = [];
+    if (task.name === "keys") state.keys = [];
+    if (task.name === "users") state.users = [];
+    setError(task.selector, result.reason);
+  });
   fillProviderOptions();
   await loadLogs();
 }
 
-async function loadLogs() {
-  const query = encodeURIComponent(state.logsQuery || "");
-  const page = await api(`/admin/api/logs?limit=${state.logsLimit}&offset=${state.logsOffset}&q=${query}`);
-  state.logsTotal = page.total || 0;
-  state.logsLimit = page.limit || state.logsLimit;
-  state.logsOffset = page.offset || 0;
-  state.logsQuery = page.query || state.logsQuery || "";
-  const input = document.querySelector('#logs-search-form [name="q"]');
-  if (input && input.value !== state.logsQuery) input.value = state.logsQuery;
-  renderLogs(page.items || []);
+async function loadLogs(showLoading = true) {
+  if (showLoading) setLoading("#logs");
+  try {
+    const query = encodeURIComponent(state.logsQuery || "");
+    const page = await api(`/admin/api/logs?limit=${state.logsLimit}&offset=${state.logsOffset}&q=${query}`);
+    state.logsTotal = page.total || 0;
+    state.logsLimit = page.limit || state.logsLimit;
+    state.logsOffset = page.offset || 0;
+    state.logsQuery = page.query || state.logsQuery || "";
+    const input = document.querySelector('#logs-search-form [name="q"]');
+    if (input && input.value !== state.logsQuery) input.value = state.logsQuery;
+    renderLogs(page.items || []);
+  } catch (error) {
+    setError("#logs", error);
+    showError(error);
+  }
 }
 
 function renderAPIAddresses() {
+  const target = document.querySelector("#api-addresses");
+  if (!target) return;
   const origin = window.location.origin;
-  document.querySelector("#api-addresses").innerHTML = [
+  target.innerHTML = [
     [t("api_base"), origin],
     [t("openai_chat"), `${origin}/v1/chat/completions`],
     [t("openai_models"), `${origin}/v1/models`],
@@ -175,16 +134,21 @@ function renderAPIAddresses() {
 }
 
 function renderStats(stats) {
-  document.querySelector("#stats").innerHTML = [
+  const target = document.querySelector("#stats");
+  if (!target) return;
+  target.innerHTML = [
     [t("requests"), stats.total_requests],
     [t("input_tokens"), formatToken(stats.input_tokens)],
     [t("output_tokens"), formatToken(stats.output_tokens)],
     [t("active_keys"), stats.active_keys],
+    [t("active_users"), stats.active_users],
+    [t("pending_users"), stats.pending_users],
     [t("providers"), stats.providers],
-  ].map(([label, value]) => `<div class="stat"><span>${label}</span><strong>${value ?? 0}</strong></div>`).join("");
+  ].map(([label, value]) => `<div class="stat"><span>${esc(label)}</span><strong>${esc(value ?? 0)}</strong></div>`).join("");
 }
 
 function detailScopeLabel(scope) {
+  if (scope === "user") return t("detail_scope_user");
   return scope === "key" ? t("detail_scope_key") : t("detail_scope_provider");
 }
 
@@ -204,20 +168,20 @@ async function openModelDetails(scope, id) {
   if (!modal || !title || !subtitle || !body) return;
   title.textContent = t("model_token_details");
   subtitle.textContent = detailScopeLabel(scope);
-  body.innerHTML = `<p class="empty">${t("loading")}</p>`;
+  body.innerHTML = ui.loadingHTML(t("loading"));
   modal.classList.remove("hidden");
   modal.querySelector("[data-close-detail]")?.focus();
   try {
     const report = await api(detailURL(scope, id));
     renderModelDetails(report);
   } catch (error) {
-    closeModelDetails();
-    alert(error.message);
+    body.innerHTML = ui.errorHTML(error.message || t("request_failed"));
+    showError(error);
   }
 }
 
 function detailStat(label, value) {
-  return `<div class="detail-stat"><span>${label}</span><strong>${value}</strong></div>`;
+  return `<div class="detail-stat"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;
 }
 
 function truncateText(value, maxLength = 24) {
@@ -240,7 +204,7 @@ function renderModelDetailChart(items) {
   const legend = tokenUsageSeries.map((series) => `
     <span class="usage-legend-item">
       <span class="usage-color" style="background:${series.color}"></span>
-      <span>${t(series.labelKey)}</span>
+      <span>${esc(t(series.labelKey))}</span>
     </span>`).join("");
   const rows = items.map((item, itemIndex) => {
     const groupTop = top + itemIndex * rowHeight;
@@ -264,7 +228,7 @@ function renderModelDetailChart(items) {
   return `
     <div class="detail-chart-panel">
       <div class="usage-summary">
-        <span>${t("model_token_chart")}</span>
+        <span>${esc(t("model_token_chart"))}</span>
         <div class="usage-legend">${legend}</div>
       </div>
       <div class="detail-chart-scroll">
@@ -282,7 +246,7 @@ function renderModelDetails(report) {
   const totals = report?.totals || {};
   const items = Array.isArray(report?.items) ? report.items : [];
   if (subtitle) {
-    subtitle.textContent = `${detailScopeLabel(report?.scope)} · ${report?.name || "-"}`;
+    subtitle.textContent = `${detailScopeLabel(report?.scope)} - ${report?.name || "-"}`;
   }
   const summary = `
     <div class="detail-stats">
@@ -295,7 +259,7 @@ function renderModelDetails(report) {
       ${detailStat(t("cache_hit_rate"), percent(totals.cache_hit_rate))}
     </div>`;
   if (!items.length) {
-    body.innerHTML = `${summary}<p class="empty">${t("empty")}</p>`;
+    body.innerHTML = `${summary}<p class="empty">${esc(t("empty"))}</p>`;
     return;
   }
   body.innerHTML = `
@@ -329,8 +293,14 @@ async function fetchTokenUsage() {
 }
 
 async function loadTokenUsage() {
-  const usage = await fetchTokenUsage();
-  renderTokenUsage(usage);
+  setLoading("#token-usage");
+  try {
+    const usage = await fetchTokenUsage();
+    renderTokenUsage(usage);
+  } catch (error) {
+    setError("#token-usage", error);
+    showError(error);
+  }
 }
 
 function updateUsageRangeControls(range) {
@@ -373,6 +343,7 @@ function usageLinePath(points, key, maxValue, left, bottom, plotWidth, plotHeigh
 function renderTokenUsage(report) {
   const container = document.querySelector("#token-usage");
   if (!container) return;
+  ui.clearRegionBusy(container);
   const range = report?.range || state.tokenUsageRange;
   state.tokenUsageRange = range;
   updateUsageRangeControls(range);
@@ -386,18 +357,18 @@ function renderTokenUsage(report) {
   const legend = tokenUsageSeries.map((series) => `
     <span class="usage-legend-item">
       <span class="usage-color" style="background:${series.color}"></span>
-      <span>${t(series.labelKey)}</span>
+      <span>${esc(t(series.labelKey))}</span>
       <strong>${formatToken(totals[series.key])}</strong>
     </span>`).join("");
   const summary = `
     <div class="usage-summary">
-      <span>${t("total_tokens")} <strong>${formatToken(totalTokens)}</strong></span>
+      <span>${esc(t("total_tokens"))} <strong>${formatToken(totalTokens)}</strong></span>
       <div class="usage-legend">${legend}</div>
     </div>`;
 
   const hasTokens = Object.values(totals).some((value) => value > 0);
   if (!points.length || !hasTokens) {
-    container.innerHTML = `${summary}<div class="usage-empty">${t("token_usage_empty")}</div>`;
+    container.innerHTML = `${summary}<div class="usage-empty">${esc(t("token_usage_empty"))}</div>`;
     return;
   }
 
@@ -422,7 +393,7 @@ function renderTokenUsage(report) {
   const xLabels = points.map((point, index) => {
     const show = report.granularity === "day" || index % 4 === 0 || index === points.length - 1;
     if (!show) return "";
-    const x = left + (plotWidth * index) / (points.length - 1);
+    const x = left + (points.length === 1 ? 0 : (plotWidth * index) / (points.length - 1));
     return `<text class="chart-axis" x="${x}" y="${bottom + 32}" text-anchor="middle">${esc(bucketLabel(point.bucket_start, report.granularity))}</text>`;
   }).join("");
   const lines = tokenUsageSeries.map((series) => `
@@ -430,7 +401,7 @@ function renderTokenUsage(report) {
   const dots = tokenUsageSeries.map((series) => points.map((point, index) => {
     const value = pointValue(point, series.key);
     if (!value) return "";
-    const x = left + (plotWidth * index) / (points.length - 1);
+    const x = left + (points.length === 1 ? 0 : (plotWidth * index) / (points.length - 1));
     const y = bottom - (value / maxValue) * plotHeight;
     return `<circle class="chart-dot" cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="3.2" fill="${series.color}"><title>${esc(`${bucketLabel(point.bucket_start, report.granularity)} ${t(series.labelKey)}: ${formatToken(value)}`)}</title></circle>`;
   }).join("")).join("");
@@ -446,12 +417,52 @@ function renderTokenUsage(report) {
     </svg>`;
 }
 
-function renderProviders() {
-  if (!state.providers.length) {
-    document.querySelector("#providers").innerHTML = `<p class="empty">${t("empty")}</p>`;
+function statusLabel(status) {
+  return t(status || "disabled");
+}
+
+function userStatus(status) {
+  const enabled = status === "enabled";
+  return `<span class="status-pill ${enabled ? "" : "off"}" title="${esc(statusLabel(status))}" aria-label="${esc(statusLabel(status))}"><span></span>${esc(statusLabel(status))}</span>`;
+}
+
+function renderUsers() {
+  const target = document.querySelector("#users");
+  if (!target) return;
+  ui.clearRegionBusy(target);
+  if (!state.users.length) {
+    target.innerHTML = `<p class="empty">${esc(t("empty"))}</p>`;
     return;
   }
-  document.querySelector("#providers").innerHTML = `
+  target.innerHTML = `
+    <table>
+      <thead><tr><th>${t("email")}</th><th>${t("status")}</th><th>${t("quota_total_tokens")}</th><th>${t("quota_used_tokens")}</th><th>${t("quota_remaining_tokens")}</th><th>${t("requests")}</th><th>${t("last_used")}</th><th></th></tr></thead>
+      <tbody>${state.users.map((user) => `
+        <tr>
+          <td>${esc(user.email)}</td>
+          <td>${userStatus(user.status)}</td>
+          <td>${formatToken(user.quota_total_tokens)}</td>
+          <td>${formatToken(user.quota_used_tokens)}</td>
+          <td>${formatToken(user.quota_remaining_tokens)}</td>
+          <td>${ui.formatCompactNumber(user.request_count)}</td>
+          <td>${date(user.last_used_at)}</td>
+          <td class="actions">
+            ${iconActionButton("detail-user", user.id, t("details"), "chart")}
+            ${iconActionButton("edit-user", user.id, t("edit"), "edit")}
+          </td>
+        </tr>`).join("")}</tbody>
+    </table>`;
+}
+
+function renderProviders() {
+  const target = document.querySelector("#providers");
+  if (!target) return;
+  ui.clearRegionBusy(target);
+  if (!state.providers.length) {
+    target.innerHTML = `<p class="empty">${esc(t("empty"))}</p>`;
+    return;
+  }
+  target.innerHTML = `
     <table>
       <thead><tr><th>${t("name")}</th><th>${t("protocol")}</th><th>${t("status")}</th><th>${t("requests")}</th><th>${t("input_tokens")}</th><th>${t("output_tokens")}</th><th>${t("cache_read_tokens")}</th><th></th></tr></thead>
       <tbody>${state.providers.map((p) => `
@@ -473,11 +484,14 @@ function renderProviders() {
 }
 
 function renderMappings() {
+  const target = document.querySelector("#mappings");
+  if (!target) return;
+  ui.clearRegionBusy(target);
   if (!state.mappings.length) {
-    document.querySelector("#mappings").innerHTML = `<p class="empty">${t("empty")}</p>`;
+    target.innerHTML = `<p class="empty">${esc(t("empty"))}</p>`;
     return;
   }
-  document.querySelector("#mappings").innerHTML = `
+  target.innerHTML = `
     <table>
       <thead><tr><th>${t("client_model")}</th><th>${t("provider")}</th><th>${t("upstream_model")}</th><th></th></tr></thead>
       <tbody>${state.mappings.map((m) => `
@@ -494,16 +508,20 @@ function renderMappings() {
 }
 
 function renderKeys() {
+  const target = document.querySelector("#keys");
+  if (!target) return;
+  ui.clearRegionBusy(target);
   if (!state.keys.length) {
-    document.querySelector("#keys").innerHTML = `<p class="empty">${t("empty")}</p>`;
+    target.innerHTML = `<p class="empty">${esc(t("empty"))}</p>`;
     return;
   }
-  document.querySelector("#keys").innerHTML = `
+  target.innerHTML = `
     <table>
-      <thead><tr><th>${t("name")}</th><th>${t("prefix")}</th><th>${t("status")}</th><th>${t("requests")}</th><th>${t("input_tokens")}</th><th>${t("cache_read_tokens")}</th><th>${t("output_tokens")}</th><th>${t("last_used")}</th><th></th></tr></thead>
+      <thead><tr><th>${t("name")}</th><th>${t("consumer_user")}</th><th>${t("prefix")}</th><th>${t("status")}</th><th>${t("requests")}</th><th>${t("input_tokens")}</th><th>${t("cache_read_tokens")}</th><th>${t("output_tokens")}</th><th>${t("last_used")}</th><th></th></tr></thead>
       <tbody>${state.keys.map((k) => `
         <tr>
           <td>${esc(k.name)}</td>
+          <td>${esc(k.consumer_email || "-")}</td>
           <td><code>${esc(k.prefix)}</code></td>
           <td>${statusIndicator(k.enabled)}</td>
           <td>${k.request_count || 0}</td>
@@ -538,15 +556,18 @@ function renderLogPager(rowCount) {
 }
 
 function renderLogs(logs) {
+  const target = document.querySelector("#logs");
+  if (!target) return;
+  ui.clearRegionBusy(target);
   const pager = renderLogPager(logs.length);
   if (!logs.length) {
-    document.querySelector("#logs").innerHTML = `${pager}<p class="empty">${t("empty")}</p>`;
+    target.innerHTML = `${pager}<p class="empty">${esc(t("empty"))}</p>`;
     return;
   }
-  document.querySelector("#logs").innerHTML = `
+  target.innerHTML = `
     ${pager}
     <table>
-      <thead><tr><th>${t("time")}</th><th>${t("protocol")}</th><th>${t("model")}</th><th>${t("provider")}</th><th>${t("distribution_key")}</th><th>${t("status")}</th><th>${t("latency")}</th><th>${t("stream")}</th><th>${t("input_tokens")}</th><th>${t("cache_read_tokens")}</th><th>${t("output_tokens")}</th><th>${t("cache_hit_rate")}</th></tr></thead>
+      <thead><tr><th>${t("time")}</th><th>${t("protocol")}</th><th>${t("model")}</th><th>${t("provider")}</th><th>${t("distribution_key")}</th><th>${t("consumer_user")}</th><th>${t("status")}</th><th>${t("latency")}</th><th>${t("stream")}</th><th>${t("input_tokens")}</th><th>${t("cache_read_tokens")}</th><th>${t("output_tokens")}</th><th>${t("cache_hit_rate")}</th></tr></thead>
       <tbody>${logs.map((log) => `
         <tr>
           <td>${date(log.created_at)}</td>
@@ -554,6 +575,7 @@ function renderLogs(logs) {
           <td>${esc(log.model)}</td>
           <td>${esc(log.provider_name)}</td>
           <td>${esc(log.distribution_key_name || "-")}</td>
+          <td>${esc(log.consumer_email || "-")}</td>
           <td>${log.status_code}</td>
           <td>${log.latency_ms} ms</td>
           <td>${log.stream ? t("yes") : t("no")}</td>
@@ -567,6 +589,7 @@ function renderLogs(logs) {
 
 function fillProviderOptions() {
   const select = document.querySelector('#mapping-form [name="provider_id"]');
+  if (!select) return;
   if (!state.providers.length) {
     select.innerHTML = `<option value="">${t("provider_select_empty")}</option>`;
     return;
@@ -576,6 +599,7 @@ function fillProviderOptions() {
 
 function openForm(id) {
   const form = document.getElementById(id);
+  if (!form) return;
   form.reset();
   form.querySelector('[name="id"]').value = "";
   form.classList.remove("hidden");
@@ -586,6 +610,7 @@ function openForm(id) {
 }
 
 function closeForm(form) {
+  if (!form) return;
   form.reset();
   form.classList.add("hidden");
 }
@@ -601,7 +626,17 @@ function splitModels(value) {
     .filter(Boolean);
 }
 
-document.addEventListener("click", async (event) => {
+async function confirmDanger(message, confirmLabel) {
+  return ui.confirmAction({
+    title: t("confirm_title"),
+    message,
+    confirmLabel: confirmLabel || t("continue"),
+    cancelLabel: t("cancel"),
+    tone: "danger",
+  });
+}
+
+async function handleClick(event) {
   const eventTarget = event.target;
   if (!(eventTarget instanceof Element)) return;
   const target = eventTarget.closest("button, [data-close-detail]") || eventTarget;
@@ -610,12 +645,8 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (target.matches("[data-copy]")) {
-    try {
-      await copyText(target.dataset.copy || "");
-      showToast(t("copied"));
-    } catch (error) {
-      alert(error.message || t("request_failed"));
-    }
+    await ui.copyText(target.dataset.copy || "");
+    ui.showToast(t("copied"));
     return;
   }
   if (target.matches("[data-clear-logs-search]")) {
@@ -640,58 +671,98 @@ document.addEventListener("click", async (event) => {
     await openModelDetails("key", target.dataset.detailKey);
     return;
   }
+  if (target.matches("[data-detail-user]")) {
+    await openModelDetails("user", target.dataset.detailUser);
+    return;
+  }
   if (target.matches("[data-open]")) {
     openForm(target.dataset.open);
+    return;
   }
   if (target.matches("[data-cancel]")) {
     closeForm(target.closest("form"));
+    return;
   }
   if (target.matches("[data-edit-provider]")) {
     const provider = state.providers.find((p) => String(p.id) === target.dataset.editProvider);
+    if (!provider) return;
     const form = document.querySelector("#provider-form");
     openForm("provider-form");
     for (const key of ["id", "name", "protocol", "base_api", "default_model"]) form.elements[key].value = provider[key] || "";
     form.elements.models.value = (provider.models || []).join("\n");
     form.elements.enabled.checked = !!provider.enabled;
     form.elements.is_default.checked = !!provider.is_default;
+    return;
   }
-  if (target.matches("[data-delete-provider]") && confirm(t("delete_provider_confirm"))) {
-    await api(`/admin/api/providers?id=${target.dataset.deleteProvider}`, { method: "DELETE" });
-    await loadAll();
+  if (target.matches("[data-delete-provider]")) {
+    if (await confirmDanger(t("delete_provider_confirm"), t("delete"))) {
+      await api(`/admin/api/providers?id=${target.dataset.deleteProvider}`, { method: "DELETE" });
+      ui.showToast(t("saved"));
+      await loadAll();
+    }
+    return;
   }
   if (target.matches("[data-edit-mapping]")) {
     const mapping = state.mappings.find((m) => String(m.id) === target.dataset.editMapping);
+    if (!mapping) return;
     const form = document.querySelector("#mapping-form");
     openForm("mapping-form");
     for (const key of ["id", "client_model", "provider_id", "upstream_model"]) form.elements[key].value = mapping[key] || "";
+    return;
   }
-  if (target.matches("[data-delete-mapping]") && confirm(t("delete_mapping_confirm"))) {
-    await api(`/admin/api/model-mappings?id=${target.dataset.deleteMapping}`, { method: "DELETE" });
-    await loadAll();
+  if (target.matches("[data-delete-mapping]")) {
+    if (await confirmDanger(t("delete_mapping_confirm"), t("delete"))) {
+      await api(`/admin/api/model-mappings?id=${target.dataset.deleteMapping}`, { method: "DELETE" });
+      ui.showToast(t("saved"));
+      await loadAll();
+    }
+    return;
+  }
+  if (target.matches("[data-edit-user]")) {
+    const user = state.users.find((u) => String(u.id) === target.dataset.editUser);
+    if (!user) return;
+    const form = document.querySelector("#user-form");
+    openForm("user-form");
+    form.elements.id.value = user.id;
+    form.elements.status.value = user.status || "pending";
+    form.elements.quota_total_tokens.value = user.quota_total_tokens || 0;
+    return;
   }
   if (target.matches("[data-edit-key]")) {
     const key = state.keys.find((k) => String(k.id) === target.dataset.editKey);
+    if (!key) return;
     const form = document.querySelector("#key-form");
     openForm("key-form");
     form.elements.id.value = key.id;
     form.elements.name.value = key.name;
     form.elements.enabled.checked = !!key.enabled;
     form.querySelector(".key-enabled").classList.remove("hidden");
+    return;
   }
-  if (target.matches("[data-delete-key]") && confirm(t("delete_key_confirm"))) {
-    await api(`/admin/api/keys?id=${target.dataset.deleteKey}`, { method: "DELETE" });
-    await loadAll();
-  }
-  if (target.matches("[data-reset-key]") && confirm(t("reset_key_confirm"))) {
-    const key = await api("/admin/api/keys/reset", { method: "POST", body: JSON.stringify({ id: Number(target.dataset.resetKey || 0) }) });
-    if (key.plain_key) {
-      renderNewKey(key.plain_key);
+  if (target.matches("[data-delete-key]")) {
+    if (await confirmDanger(t("delete_key_confirm"), t("delete"))) {
+      await api(`/admin/api/keys?id=${target.dataset.deleteKey}`, { method: "DELETE" });
+      ui.showToast(t("saved"));
+      await loadAll();
     }
-    await loadAll();
+    return;
   }
-  if (target.matches("[data-reset-key-stats]") && confirm(t("reset_key_stats_confirm"))) {
-    await api("/admin/api/keys/reset-stats", { method: "POST", body: JSON.stringify({ id: Number(target.dataset.resetKeyStats || 0) }) });
-    await loadAll();
+  if (target.matches("[data-reset-key]")) {
+    if (await confirmDanger(t("reset_key_confirm"), t("reset_key"))) {
+      const key = await api("/admin/api/keys/reset", { method: "POST", body: JSON.stringify({ id: Number(target.dataset.resetKey || 0) }) });
+      await loadAll();
+      if (key.plain_key) renderNewKey(key.plain_key);
+      ui.showToast(t("saved"));
+    }
+    return;
+  }
+  if (target.matches("[data-reset-key-stats]")) {
+    if (await confirmDanger(t("reset_key_stats_confirm"), t("reset_key_stats"))) {
+      await api("/admin/api/keys/reset-stats", { method: "POST", body: JSON.stringify({ id: Number(target.dataset.resetKeyStats || 0) }) });
+      ui.showToast(t("saved"));
+      await loadAll();
+    }
+    return;
   }
   if (target.matches("[data-logs-page]")) {
     if (target.dataset.logsPage === "prev") {
@@ -701,6 +772,10 @@ document.addEventListener("click", async (event) => {
     }
     await loadLogs();
   }
+}
+
+document.addEventListener("click", (event) => {
+  handleClick(event).catch(showError);
 });
 
 document.addEventListener("keydown", (event) => {
@@ -709,54 +784,78 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-document.querySelector("#logs-search-form").addEventListener("submit", async (event) => {
+document.querySelector("#logs-search-form")?.addEventListener("submit", async (event) => {
   event.preventDefault();
   state.logsQuery = String(new FormData(event.currentTarget).get("q") || "").trim();
   state.logsOffset = 0;
   await loadLogs();
 });
 
-document.querySelector("#provider-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const data = formData(form);
-  data.id = Number(data.id || 0);
-  data.models = splitModels(data.models);
-  data.enabled = form.elements.enabled.checked;
-  data.is_default = form.elements.is_default.checked;
-  const method = data.id ? "PUT" : "POST";
-  await api("/admin/api/providers", { method, body: JSON.stringify(data) });
-  closeForm(form);
-  await loadAll();
-});
-
-document.querySelector("#mapping-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const data = formData(form);
-  data.id = Number(data.id || 0);
-  data.provider_id = Number(data.provider_id || 0);
-  const method = data.id ? "PUT" : "POST";
-  await api("/admin/api/model-mappings", { method, body: JSON.stringify(data) });
-  closeForm(form);
-  await loadAll();
-});
-
-document.querySelector("#key-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const data = formData(form);
-  data.id = Number(data.id || 0);
-  data.enabled = form.elements.enabled.checked;
-  const method = data.id ? "PUT" : "POST";
-  const key = await api("/admin/api/keys", { method, body: JSON.stringify(data) });
-  if (key.plain_key) {
-    renderNewKey(key.plain_key);
+async function submitForm(form, task) {
+  try {
+    await ui.withFormBusy(form, task, t("saving"));
+    ui.showToast(t("saved"));
+  } catch (error) {
+    showError(error);
   }
-  closeForm(form);
-  await loadAll();
+}
+
+document.querySelector("#provider-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  await submitForm(form, async () => {
+    const data = formData(form);
+    data.id = Number(data.id || 0);
+    data.models = splitModels(data.models);
+    data.enabled = form.elements.enabled.checked;
+    data.is_default = form.elements.is_default.checked;
+    const method = data.id ? "PUT" : "POST";
+    await api("/admin/api/providers", { method, body: JSON.stringify(data) });
+    closeForm(form);
+    await loadAll();
+  });
 });
 
-loadAll().catch((error) => {
-  alert(error.message);
+document.querySelector("#mapping-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  await submitForm(form, async () => {
+    const data = formData(form);
+    data.id = Number(data.id || 0);
+    data.provider_id = Number(data.provider_id || 0);
+    const method = data.id ? "PUT" : "POST";
+    await api("/admin/api/model-mappings", { method, body: JSON.stringify(data) });
+    closeForm(form);
+    await loadAll();
+  });
 });
+
+document.querySelector("#user-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  await submitForm(form, async () => {
+    const data = formData(form);
+    data.id = Number(data.id || 0);
+    data.quota_total_tokens = Number(data.quota_total_tokens || 0);
+    await api("/admin/api/users", { method: "PUT", body: JSON.stringify(data) });
+    closeForm(form);
+    await loadAll();
+  });
+});
+
+document.querySelector("#key-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  await submitForm(form, async () => {
+    const data = formData(form);
+    data.id = Number(data.id || 0);
+    data.enabled = form.elements.enabled.checked;
+    const method = data.id ? "PUT" : "POST";
+    const key = await api("/admin/api/keys", { method, body: JSON.stringify(data) });
+    closeForm(form);
+    await loadAll();
+    if (key.plain_key) renderNewKey(key.plain_key);
+  });
+});
+
+loadAll().catch(showError);

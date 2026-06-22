@@ -60,6 +60,12 @@ type keyPayload struct {
 	Enabled bool   `json:"enabled"`
 }
 
+type userPayload struct {
+	ID               int64  `json:"id"`
+	Status           string `json:"status"`
+	QuotaTotalTokens int64  `json:"quota_total_tokens"`
+}
+
 type logsPage struct {
 	Items  []store.RequestLog `json:"items"`
 	Total  int64              `json:"total"`
@@ -111,6 +117,8 @@ func (h *Handler) Register(r chi.Router) {
 		r.Delete("/admin/api/keys", h.keys)
 		r.Post("/admin/api/keys/reset", h.resetKey)
 		r.Post("/admin/api/keys/reset-stats", h.resetKeyStats)
+		r.Get("/admin/api/users", h.users)
+		r.Put("/admin/api/users", h.users)
 		r.Get("/admin/api/stats", h.stats)
 		r.Get("/admin/api/token-usage", h.tokenUsage)
 		r.Get("/admin/api/model-token-details", h.modelTokenDetails)
@@ -372,6 +380,28 @@ func (h *Handler) resetKeyStats(w http.ResponseWriter, r *http.Request) {
 	h.writeResult(w, r, key, err)
 }
 
+func (h *Handler) users(w http.ResponseWriter, r *http.Request) {
+	if !h.requireCSRFForWrite(w, r) {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		users, err := h.store.ConsumerUsers(r.Context())
+		h.writeResult(w, r, users, err)
+	case http.MethodPut:
+		var payload userPayload
+		if !h.decodePayload(w, r, &payload) {
+			return
+		}
+		user, err := h.store.UpdateConsumerUser(r.Context(), payload.ID, strings.TrimSpace(payload.Status), payload.QuotaTotalTokens)
+		if errors.Is(err, store.ErrInvalidUserStatus) {
+			h.writeLocalizedError(w, r, http.StatusBadRequest, "invalid_user_status")
+			return
+		}
+		h.writeResult(w, r, user, err)
+	}
+}
+
 func (h *Handler) stats(w http.ResponseWriter, r *http.Request) {
 	stats, err := h.store.Stats(r.Context())
 	h.writeResult(w, r, stats, err)
@@ -626,6 +656,18 @@ const templates = `
     </section>
     <section class="panel">
       <div class="section-head">
+        <h2>{{tr .Lang "users"}}</h2>
+      </div>
+      <form id="user-form" class="editor hidden">
+        <input type="hidden" name="id">
+        <label>{{tr .Lang "status"}}<select name="status"><option value="pending">{{tr .Lang "pending"}}</option><option value="enabled">{{tr .Lang "enabled"}}</option><option value="disabled">{{tr .Lang "disabled"}}</option></select></label>
+        <label>{{tr .Lang "quota_total_tokens"}}<input name="quota_total_tokens" type="number" min="0" step="1" required></label>
+        <div class="row-actions"><button type="submit">{{tr .Lang "save"}}</button><button type="button" class="secondary" data-cancel>{{tr .Lang "cancel"}}</button></div>
+      </form>
+      <div id="users" class="table-wrap"></div>
+    </section>
+    <section class="panel">
+      <div class="section-head">
         <h2>{{tr .Lang "providers"}}</h2>
         <button type="button" class="icon-label" data-open="provider-form">
           <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-add"></use></svg>
@@ -715,6 +757,7 @@ const templates = `
     window.__ADMIN_LANG__ = {{.LangJSON}};
     window.__ADMIN_I18N__ = {{.I18NJSON}};
   </script>
+  <script src="/admin/static/common.js"></script>
   <script src="/admin/static/app.js"></script>
 </body>
 </html>

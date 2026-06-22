@@ -24,13 +24,26 @@ type Session struct {
 }
 
 type Sessions struct {
-	mu       sync.Mutex
-	sessions map[string]Session
-	ttl      time.Duration
+	mu            sync.Mutex
+	sessions      map[string]Session
+	ttl           time.Duration
+	sessionCookie string
+	csrfCookie    string
+	path          string
 }
 
 func NewSessions(ttl time.Duration) *Sessions {
-	return &Sessions{sessions: map[string]Session{}, ttl: ttl}
+	return NewScopedSessions(ttl, SessionCookie, CSRFCookie, "/admin")
+}
+
+func NewScopedSessions(ttl time.Duration, sessionCookie, csrfCookie, path string) *Sessions {
+	return &Sessions{
+		sessions:      map[string]Session{},
+		ttl:           ttl,
+		sessionCookie: sessionCookie,
+		csrfCookie:    csrfCookie,
+		path:          path,
+	}
 }
 
 func (s *Sessions) Create(w http.ResponseWriter, userID int64, username string) error {
@@ -48,17 +61,17 @@ func (s *Sessions) Create(w http.ResponseWriter, userID int64, username string) 
 	s.mu.Unlock()
 
 	http.SetCookie(w, &http.Cookie{
-		Name:     SessionCookie,
+		Name:     s.sessionCookie,
 		Value:    token,
-		Path:     "/admin",
+		Path:     s.path,
 		Expires:  expires,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
 	http.SetCookie(w, &http.Cookie{
-		Name:     CSRFCookie,
+		Name:     s.csrfCookie,
 		Value:    csrf,
-		Path:     "/admin",
+		Path:     s.path,
 		Expires:  expires,
 		SameSite: http.SameSiteLaxMode,
 	})
@@ -66,18 +79,18 @@ func (s *Sessions) Create(w http.ResponseWriter, userID int64, username string) 
 }
 
 func (s *Sessions) Clear(w http.ResponseWriter, r *http.Request) {
-	if cookie, err := r.Cookie(SessionCookie); err == nil {
+	if cookie, err := r.Cookie(s.sessionCookie); err == nil {
 		s.mu.Lock()
 		delete(s.sessions, cookie.Value)
 		s.mu.Unlock()
 	}
 	expired := time.Unix(0, 0)
-	http.SetCookie(w, &http.Cookie{Name: SessionCookie, Value: "", Path: "/admin", Expires: expired, MaxAge: -1})
-	http.SetCookie(w, &http.Cookie{Name: CSRFCookie, Value: "", Path: "/admin", Expires: expired, MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: s.sessionCookie, Value: "", Path: s.path, Expires: expired, MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: s.csrfCookie, Value: "", Path: s.path, Expires: expired, MaxAge: -1})
 }
 
 func (s *Sessions) Get(r *http.Request) (Session, bool) {
-	cookie, err := r.Cookie(SessionCookie)
+	cookie, err := r.Cookie(s.sessionCookie)
 	if err != nil || cookie.Value == "" {
 		return Session{}, false
 	}
@@ -95,8 +108,16 @@ func (s *Sessions) Get(r *http.Request) (Session, bool) {
 	return session, true
 }
 
+func (s *Sessions) ValidateCSRF(r *http.Request) bool {
+	return validateCSRF(r, s.csrfCookie)
+}
+
 func ValidateCSRF(r *http.Request) bool {
-	cookie, err := r.Cookie(CSRFCookie)
+	return validateCSRF(r, CSRFCookie)
+}
+
+func validateCSRF(r *http.Request, cookieName string) bool {
+	cookie, err := r.Cookie(cookieName)
 	if err != nil || cookie.Value == "" {
 		return false
 	}

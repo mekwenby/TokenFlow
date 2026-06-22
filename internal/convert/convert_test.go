@@ -46,6 +46,81 @@ func TestAnthropicRequestToOpenAIMultimodalAndTools(t *testing.T) {
 	}
 }
 
+func TestAnthropicRequestToOpenAIThinkingAndToolUse(t *testing.T) {
+	req := JSON{
+		"model":      "client-model",
+		"max_tokens": 32,
+		"messages": []any{JSON{
+			"role": "assistant",
+			"content": []any{
+				JSON{"type": "thinking", "thinking": "I should call the lookup tool."},
+				JSON{"type": "tool_use", "id": "call_123", "name": "lookup", "input": JSON{"q": "x"}},
+			},
+		}},
+	}
+
+	out := AnthropicRequestToOpenAI(req, "upstream-model")
+	messages := out["messages"].([]any)
+	if len(messages) != 1 {
+		t.Fatalf("expected one assistant message, got %d", len(messages))
+	}
+	assistant := messages[0].(JSON)
+	if assistant["reasoning_content"] != "I should call the lookup tool." {
+		t.Fatalf("reasoning content was not preserved: %#v", assistant)
+	}
+	if len(assistant["tool_calls"].([]any)) != 1 {
+		t.Fatalf("tool call was not preserved: %#v", assistant)
+	}
+}
+
+func TestAnthropicRequestToOpenAIEmptyThinkingPassback(t *testing.T) {
+	req := JSON{
+		"model":      "client-model",
+		"max_tokens": 32,
+		"messages": []any{JSON{
+			"role": "assistant",
+			"content": []any{
+				JSON{"type": "thinking", "thinking": ""},
+				JSON{"type": "tool_use", "id": "call_123", "name": "lookup", "input": JSON{}},
+			},
+		}},
+	}
+
+	out := AnthropicRequestToOpenAI(req, "upstream-model")
+	assistant := out["messages"].([]any)[0].(JSON)
+	reasoning, ok := assistant["reasoning_content"]
+	if !ok || reasoning != "" {
+		t.Fatalf("empty reasoning content was not passed back: %#v", assistant)
+	}
+}
+
+func TestOpenAIResponseToAnthropicReasoningContent(t *testing.T) {
+	resp := JSON{
+		"choices": []any{JSON{
+			"finish_reason": "stop",
+			"message": JSON{
+				"reasoning_content": "I should answer directly.",
+				"content":           "hello",
+			},
+		}},
+		"usage": JSON{"prompt_tokens": 10, "completion_tokens": 4},
+	}
+
+	out := OpenAIResponseToAnthropic(resp, "model")
+	content := out["content"].([]any)
+	if len(content) != 2 {
+		t.Fatalf("expected thinking + text blocks, got %#v", content)
+	}
+	thinking := content[0].(JSON)
+	if thinking["type"] != "thinking" || thinking["thinking"] != "I should answer directly." {
+		t.Fatalf("unexpected thinking block: %#v", thinking)
+	}
+	text := content[1].(JSON)
+	if text["type"] != "text" || text["text"] != "hello" {
+		t.Fatalf("unexpected text block: %#v", text)
+	}
+}
+
 func TestOpenAIResponseToAnthropicToolCall(t *testing.T) {
 	resp := JSON{
 		"choices": []any{JSON{

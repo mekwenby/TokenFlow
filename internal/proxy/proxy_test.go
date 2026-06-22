@@ -148,6 +148,145 @@ func TestAnthropicToOpenAIStreamingProxy(t *testing.T) {
 	}
 }
 
+func TestAnthropicToOpenAIStreamingProxyConvertsReasoningContent(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		_, _ = w.Write([]byte(`data: {"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}],"usage":null}` + "\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte(`data: {"choices":[{"index":0,"delta":{"reasoning_content":"I should use the tool context."},"finish_reason":null}],"usage":null}` + "\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte(`data: {"choices":[{"index":0,"delta":{"content":"Done"},"finish_reason":"stop"}],"usage":null}` + "\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte(`data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3}}` + "\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	handler, clientKey := testHandler(t, upstream.URL+"/v1")
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"client-model","stream":true,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("x-api-key", clientKey)
+	rec := httptest.NewRecorder()
+
+	handler.AnthropicMessages(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d: %s", rec.Code, rec.Body.String())
+	}
+	out := rec.Body.String()
+	for _, expected := range []string{`"type":"thinking"`, `"type":"thinking_delta"`, `"thinking":"I should use the tool context."`, `"type":"text_delta"`, `"text":"Done"`} {
+		if !strings.Contains(out, expected) {
+			t.Fatalf("missing %q in stream:\n%s", expected, out)
+		}
+	}
+}
+
+func TestConsumerKeyQuotaEnforced(t *testing.T) {
+	var upstreamCalls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	handler, st, _ := testHandlerWithStore(t, upstream.URL+"/v1")
+	ctx := context.Background()
+	user, err := st.CreateConsumerUser(ctx, "customer@example.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientKey := "sk-consumer-client"
+	if _, err := st.CreateConsumerDistributionKey(ctx, user.ID, "customer", "sk-consumer", auth.HashKey(clientKey)); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"client-model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("x-api-key", clientKey)
+	rec := httptest.NewRecorder()
+	handler.AnthropicMessages(rec, req)
+	if rec.Code != http.StatusUnauthorized || upstreamCalls != 0 {
+		t.Fatalf("pending user should be rejected before upstream: status=%d calls=%d body=%s", rec.Code, upstreamCalls, rec.Body.String())
+	}
+
+	if _, err := st.UpdateConsumerUser(ctx, user.ID, store.ConsumerStatusEnabled, 5); err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"client-model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("x-api-key", clientKey)
+	rec = httptest.NewRecorder()
+	handler.AnthropicMessages(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enabled user should succeed: %d %s", rec.Code, rec.Body.String())
+	}
+	user, err = st.ConsumerUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.QuotaUsedTokens != 5 || user.RequestCount != 1 {
+		t.Fatalf("quota was not consumed: %#v", user)
+	}
+	logs, err := st.Logs(ctx, 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 || logs[0].ConsumerEmail != "customer@example.com" || logs[0].ConsumerUserID == nil {
+		t.Fatalf("consumer log was not recorded: %#v", logs)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"client-model","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("x-api-key", clientKey)
+	rec = httptest.NewRecorder()
+	handler.AnthropicMessages(rec, req)
+	if rec.Code != http.StatusTooManyRequests || upstreamCalls != 1 {
+		t.Fatalf("exhausted user should be rejected before upstream: status=%d calls=%d body=%s", rec.Code, upstreamCalls, rec.Body.String())
+	}
+}
+
+func TestConsumerStreamingRequestUpdatesQuota(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		_, _ = w.Write([]byte(`data: {"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}],"usage":null}` + "\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte(`data: {"choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":"stop"}],"usage":null}` + "\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte(`data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2}}` + "\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	handler, st, _ := testHandlerWithStore(t, upstream.URL+"/v1")
+	ctx := context.Background()
+	user, err := st.CreateConsumerUser(ctx, "stream@example.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpdateConsumerUser(ctx, user.ID, store.ConsumerStatusEnabled, 10); err != nil {
+		t.Fatal(err)
+	}
+	clientKey := "sk-stream-client"
+	if _, err := st.CreateConsumerDistributionKey(ctx, user.ID, "stream", "sk-stream", auth.HashKey(clientKey)); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"client-model","stream":true,"max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("x-api-key", clientKey)
+	rec := httptest.NewRecorder()
+	handler.AnthropicMessages(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected stream status %d: %s", rec.Code, rec.Body.String())
+	}
+	user, err = st.ConsumerUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.QuotaUsedTokens != 7 || user.RequestCount != 1 {
+		t.Fatalf("stream usage was not consumed: %#v", user)
+	}
+}
+
 func testHandler(t *testing.T, baseAPI string) (*Handler, string) {
 	handler, _, clientKey := testHandlerWithStore(t, baseAPI)
 	return handler, clientKey

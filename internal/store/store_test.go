@@ -273,6 +273,117 @@ func TestRequestLogDistributionKeyColumnMigration(t *testing.T) {
 	}
 }
 
+func TestConsumerUsersKeysQuotaAndLogs(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	user, err := st.CreateConsumerUser(ctx, "USER@example.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.Email != "user@example.com" || user.Status != ConsumerStatusPending || user.QuotaTotalTokens != 0 {
+		t.Fatalf("unexpected new consumer: %#v", user)
+	}
+	user, err = st.UpdateConsumerUser(ctx, user.ID, ConsumerStatusEnabled, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.Status != ConsumerStatusEnabled || user.QuotaRemainingTokens != 10 {
+		t.Fatalf("unexpected approved consumer: %#v", user)
+	}
+	if _, err := st.UpdateConsumerUser(ctx, user.ID, "bad", 10); err != ErrInvalidUserStatus {
+		t.Fatalf("invalid status should be rejected, got %v", err)
+	}
+
+	key, err := st.CreateConsumerDistributionKey(ctx, user.ID, "consumer-key", "sk-consumer", "hash-consumer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key.ConsumerUserID == nil || *key.ConsumerUserID != user.ID || key.ConsumerEmail != user.Email {
+		t.Fatalf("consumer key was not linked: %#v", key)
+	}
+	unbound, err := st.CreateDistributionKey(ctx, "admin-key", "sk-admin", "hash-admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unbound.ConsumerUserID != nil {
+		t.Fatalf("admin key should remain unbound: %#v", unbound)
+	}
+
+	keyID := key.ID
+	userID := user.ID
+	if err := st.RecordRequest(ctx, RequestLog{
+		Protocol:            "openai",
+		Model:               "model-a",
+		DistributionKeyID:   &keyID,
+		DistributionKeyName: key.Name,
+		ConsumerUserID:      &userID,
+		ConsumerEmail:       user.Email,
+		StatusCode:          200,
+		LatencyMS:           3,
+		InputTokens:         7,
+		OutputTokens:        4,
+		CacheReadTokens:     2,
+		CacheCreationTokens: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	user, err = st.ConsumerUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.RequestCount != 1 || user.QuotaUsedTokens != 11 || user.QuotaRemainingTokens != -1 || user.InputTokens != 7 || user.OutputTokens != 4 {
+		t.Fatalf("consumer usage was not updated: %#v", user)
+	}
+	key, err = st.DistributionKey(ctx, key.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key.RequestCount != 1 || key.InputTokens != 7 || key.OutputTokens != 4 {
+		t.Fatalf("key usage was not updated: %#v", key)
+	}
+
+	if err := st.RecordRequest(ctx, RequestLog{
+		Protocol:          "openai",
+		Model:             "model-a",
+		DistributionKeyID: &keyID,
+		ConsumerUserID:    &userID,
+		ConsumerEmail:     user.Email,
+		StatusCode:        500,
+		LatencyMS:         2,
+		InputTokens:       100,
+		OutputTokens:      100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	user, err = st.ConsumerUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.RequestCount != 1 || user.QuotaUsedTokens != 11 {
+		t.Fatalf("failed request should not consume quota: %#v", user)
+	}
+
+	logs, err := st.LogsSearch(ctx, 10, 0, "user@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 2 || logs[0].ConsumerEmail != user.Email || logs[0].ConsumerUserID == nil {
+		t.Fatalf("consumer logs were not searchable: %#v", logs)
+	}
+	report, err := st.ModelTokenDetails(ctx, "user", user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Scope != "user" || report.Name != user.Email || report.Totals.Requests != 2 || report.Totals.InputTokens != 107 {
+		t.Fatalf("unexpected user report: %#v", report)
+	}
+}
+
 func TestStoreLogsPagination(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(filepath.Join(t.TempDir(), "gateway.db"))

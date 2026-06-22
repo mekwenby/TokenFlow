@@ -144,6 +144,80 @@ button:disabled {
   font-size: 24px;
 }
 
+.portal-card {
+  width: min(720px, 100%);
+}
+
+.portal-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+  border-top: 1px solid var(--border);
+}
+
+.portal-option {
+  min-width: 0;
+  padding: 18px 18px 0 0;
+}
+
+.portal-option + .portal-option {
+  border-left: 1px solid var(--border);
+  padding-right: 0;
+  padding-left: 18px;
+}
+
+.portal-option h2 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.portal-option p {
+  min-height: 40px;
+  margin: 8px 0 16px;
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.portal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  border: 1px solid var(--primary);
+  border-radius: 7px;
+  background: var(--primary);
+  color: #fff;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-decoration: none;
+}
+
+.button-link:hover {
+  background: var(--primary-hover);
+  border-color: var(--primary-hover);
+}
+
+.button-link.secondary {
+  border-color: var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.button-link.secondary:hover {
+  background: var(--surface-muted);
+  border-color: var(--muted);
+}
+
 .auth-title {
   margin: -4px 0 18px;
   color: var(--muted-strong);
@@ -223,6 +297,27 @@ code {
   padding: 9px 10px;
   font-size: 13px;
   font-weight: 700;
+}
+
+.inline-error {
+  margin: 0;
+  border: 1px solid #f4b6ae;
+  border-radius: 7px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  padding: 10px 11px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.loading {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+}
+
+button.busy {
+  opacity: 0.72;
 }
 
 .admin-page {
@@ -791,6 +886,33 @@ td.actions button {
   padding: 18px;
 }
 
+.confirm-dialog {
+  width: min(420px, 100%);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.22);
+  padding: 20px;
+}
+
+.confirm-dialog h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.confirm-dialog p {
+  margin: 10px 0 18px;
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .modal-head {
   display: flex;
   align-items: flex-start;
@@ -909,6 +1031,11 @@ td.actions button {
   transform: translateY(0);
 }
 
+.toast.error {
+  border-color: #7f1d1d;
+  background: #7f1d1d;
+}
+
 @media (max-width: 1100px) {
   .stats-grid,
   .api-grid {
@@ -927,6 +1054,24 @@ td.actions button {
 
   .auth-card {
     padding: 22px;
+  }
+
+  .portal-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .portal-option {
+    padding: 16px 0;
+  }
+
+  .portal-option + .portal-option {
+    border-top: 1px solid var(--border);
+    border-left: 0;
+    padding-left: 0;
+  }
+
+  .portal-actions {
+    display: grid;
   }
 
   .auth-head {
@@ -994,6 +1139,10 @@ td.actions button {
 
   .modal-dialog {
     max-height: calc(100vh - 24px);
+  }
+
+  .confirm-dialog {
+    align-self: center;
   }
 
   .secret {

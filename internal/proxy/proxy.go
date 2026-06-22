@@ -101,6 +101,10 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request, inbound string)
 	keyValue := keyFromRequest(r, inbound)
 	key, err := h.authenticate(ctx, keyValue)
 	if err != nil {
+		if errors.Is(err, store.ErrQuotaExceeded) {
+			h.writeProtocolError(w, inbound, http.StatusTooManyRequests, "insufficient_quota", "quota exceeded")
+			return
+		}
 		h.writeProtocolError(w, inbound, http.StatusUnauthorized, "authentication_error", "invalid or disabled API key")
 		return
 	}
@@ -331,12 +335,20 @@ func streamOpenAIToAnthropic(w io.Writer, flush func(), body io.Reader, model st
 	}))
 
 	var usage convert.Usage
+	var thinkingOpen bool
+	var thinkingIndex = -1
 	var textOpen bool
 	var textIndex = -1
 	var nextIndex int
 	var finishReason = "end_turn"
 	toolIndexes := map[int]int{}
 	openToolBlocks := map[int]bool{}
+	closeThinking := func() {
+		if thinkingOpen {
+			writeAndFlush(w, flush, convert.BuildAnthropicEvent("content_block_stop", map[string]any{"index": thinkingIndex}))
+			thinkingOpen = false
+		}
+	}
 
 	err := readSSE(body, func(event sseEvent) error {
 		if event.Data == "" || event.Data == "[DONE]" {
@@ -356,7 +368,29 @@ func streamOpenAIToAnthropic(w io.Writer, flush func(), body io.Reader, model st
 				finishReason = openAIFinishToAnthropic(reason)
 			}
 			delta, _ := choice["delta"].(map[string]any)
+			if reasoning, ok := delta["reasoning_content"].(string); ok {
+				if textOpen {
+					writeAndFlush(w, flush, convert.BuildAnthropicEvent("content_block_stop", map[string]any{"index": textIndex}))
+					textOpen = false
+				}
+				if !thinkingOpen {
+					thinkingIndex = nextIndex
+					nextIndex++
+					thinkingOpen = true
+					writeAndFlush(w, flush, convert.BuildAnthropicEvent("content_block_start", map[string]any{
+						"index":         thinkingIndex,
+						"content_block": map[string]any{"type": "thinking", "thinking": ""},
+					}))
+				}
+				if reasoning != "" {
+					writeAndFlush(w, flush, convert.BuildAnthropicEvent("content_block_delta", map[string]any{
+						"index": thinkingIndex,
+						"delta": map[string]any{"type": "thinking_delta", "thinking": reasoning},
+					}))
+				}
+			}
 			if content := stringField(delta, "content"); content != "" {
+				closeThinking()
 				if !textOpen {
 					textIndex = nextIndex
 					nextIndex++
@@ -372,6 +406,7 @@ func streamOpenAIToAnthropic(w io.Writer, flush func(), body io.Reader, model st
 				}))
 			}
 			for _, toolValue := range arrayField(delta, "tool_calls") {
+				closeThinking()
 				tool, _ := toolValue.(map[string]any)
 				upstreamIndex := intField(tool, "index", 0)
 				blockIndex, ok := toolIndexes[upstreamIndex]
@@ -408,6 +443,7 @@ func streamOpenAIToAnthropic(w io.Writer, flush func(), body io.Reader, model st
 	if err != nil {
 		return usage, err
 	}
+	closeThinking()
 	if textOpen {
 		writeAndFlush(w, flush, convert.BuildAnthropicEvent("content_block_stop", map[string]any{"index": textIndex}))
 	}
@@ -509,18 +545,38 @@ func (h *Handler) authenticate(ctx context.Context, value string) (store.Distrib
 	if !key.Enabled {
 		return key, store.ErrNotFound
 	}
+	if key.ConsumerUserID != nil {
+		user, err := h.store.ConsumerUser(ctx, *key.ConsumerUserID)
+		if err != nil {
+			return key, store.ErrNotFound
+		}
+		if user.Status != store.ConsumerStatusEnabled {
+			return key, store.ErrNotFound
+		}
+		if user.QuotaUsedTokens >= user.QuotaTotalTokens {
+			return key, store.ErrQuotaExceeded
+		}
+		key.ConsumerEmail = user.Email
+	}
 	return key, nil
 }
 
 func (h *Handler) finish(ctx context.Context, req requestContext, statusCode int, usage convert.Usage) {
 	providerID := req.Route.Provider.ID
 	distributionKeyID := req.Key.ID
-	_ = h.store.InsertRequestLog(ctx, store.RequestLog{
+	var consumerUserID *int64
+	if req.Key.ConsumerUserID != nil {
+		id := *req.Key.ConsumerUserID
+		consumerUserID = &id
+	}
+	_ = h.store.RecordRequest(ctx, store.RequestLog{
 		Protocol:            req.Protocol,
 		Model:               req.Model,
 		ProviderID:          &providerID,
 		DistributionKeyID:   &distributionKeyID,
 		DistributionKeyName: req.Key.Name,
+		ConsumerUserID:      consumerUserID,
+		ConsumerEmail:       req.Key.ConsumerEmail,
 		StatusCode:          statusCode,
 		LatencyMS:           time.Since(req.StartedAt).Milliseconds(),
 		InputTokens:         usage.InputTokens,
@@ -529,9 +585,6 @@ func (h *Handler) finish(ctx context.Context, req requestContext, statusCode int
 		CacheCreationTokens: usage.CacheCreationTokens,
 		Stream:              req.Stream,
 	})
-	if statusCode >= 200 && statusCode < 300 {
-		_ = h.store.UpdateKeyStats(ctx, req.Key.ID, usage.InputTokens, usage.CacheReadTokens, usage.OutputTokens)
-	}
 }
 
 func (h *Handler) models(ctx context.Context) ([]string, error) {

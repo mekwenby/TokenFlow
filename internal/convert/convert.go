@@ -59,12 +59,21 @@ func AnthropicRequestToOpenAI(req JSON, model string) JSON {
 			openAIContent := make([]any, 0)
 			textParts := make([]string, 0)
 			toolCalls := make([]any, 0)
+			reasoningParts := make([]string, 0)
+			hasReasoning := false
 			for _, blockValue := range v {
 				block, ok := blockValue.(map[string]any)
 				if !ok {
 					continue
 				}
 				switch stringValue(block["type"]) {
+				case "thinking":
+					if role == "assistant" {
+						if thinking, ok := block["thinking"].(string); ok {
+							hasReasoning = true
+							reasoningParts = append(reasoningParts, thinking)
+						}
+					}
 				case "text":
 					text := stringValue(block["text"])
 					textParts = append(textParts, text)
@@ -91,7 +100,7 @@ func AnthropicRequestToOpenAI(req JSON, model string) JSON {
 					messages = append(messages, result)
 				}
 			}
-			if len(openAIContent) > 0 || len(toolCalls) > 0 {
+			if len(openAIContent) > 0 || len(toolCalls) > 0 || hasReasoning {
 				out := JSON{"role": role}
 				if len(openAIContent) == 0 {
 					out["content"] = strings.Join(textParts, "\n")
@@ -105,6 +114,9 @@ func AnthropicRequestToOpenAI(req JSON, model string) JSON {
 					if _, ok := out["content"]; !ok {
 						out["content"] = nil
 					}
+				}
+				if hasReasoning {
+					out["reasoning_content"] = strings.Join(reasoningParts, "\n")
 				}
 				messages = append(messages, out)
 			}
@@ -211,6 +223,9 @@ func OpenAIResponseToAnthropic(resp JSON, model string) JSON {
 	}
 	message, _ := choice["message"].(map[string]any)
 	blocks := make([]any, 0)
+	if reasoning, ok := message["reasoning_content"].(string); ok {
+		blocks = append(blocks, JSON{"type": "thinking", "thinking": reasoning})
+	}
 	if text := stringValue(message["content"]); text != "" {
 		blocks = append(blocks, JSON{"type": "text", "text": text})
 	}

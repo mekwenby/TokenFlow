@@ -44,6 +44,17 @@ func TestLoginUsesAcceptLanguageAndCookieOverride(t *testing.T) {
 	}
 }
 
+func TestAdminTranslationsIncludeChineseKeys(t *testing.T) {
+	for key := range translations["en"] {
+		if _, ok := translations["zh-CN"][key]; !ok {
+			t.Fatalf("missing zh-CN translation for %q", key)
+		}
+	}
+	if got := tr("zh-CN", "invalid_detail_scope"); !strings.Contains(got, "user") {
+		t.Fatalf("invalid_detail_scope should mention user, got %q", got)
+	}
+}
+
 func TestLanguagePostSetsCookieAndSanitizesNext(t *testing.T) {
 	_, router := testAdmin(t)
 
@@ -110,7 +121,7 @@ func TestDashboardInjectsLanguageAndTranslations(t *testing.T) {
 		t.Fatalf("unexpected status: %d", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, expected := range []string{`<html lang="zh-CN">`, "TokenFlow", "tokenflow-logo.svg", "icons.svg", "上游供应商", "支持模型", `id="api-addresses"`, `id="token-usage"`, `id="detail-modal"`, `id="logs-search-form"`, `window.__ADMIN_LANG__ = "zh-CN"`, `"requests":"请求数"`, `"api_addresses":"API 地址"`, `"token_usage":"Token 使用趋势"`, `"model_token_details":"模型 Token 明细"`, `"logs_search":"搜索请求"`, `"cache_hit_rate":"缓存命中率"`, `"previous_page":"上一页"`, `"next_page":"下一页"`, `"reset_key":"重新生成"`, `"reset_key_stats":"重置统计"`, `"distribution_key":"Key 名称"`, `"copy":"复制"`, `"copied":"已复制"`} {
+	for _, expected := range []string{`<html lang="zh-CN">`, "TokenFlow", "tokenflow-logo.svg", "icons.svg", "common.js", "app.js", "上游供应商", "支持模型", "用户", `id="api-addresses"`, `id="token-usage"`, `id="detail-modal"`, `id="logs-search-form"`, `window.__ADMIN_LANG__ = "zh-CN"`, `"requests":"请求数"`, `"api_addresses":"API 地址"`, `"token_usage":"Token 使用趋势"`, `"model_token_details":"模型 Token 明细"`, `"detail_scope_user":"用户"`, `"active_users":"启用用户"`, `"pending_users":"待审核用户"`, `"logs_search":"搜索请求"`, `"cache_hit_rate":"缓存命中率"`, `"previous_page":"上一页"`, `"next_page":"下一页"`, `"reset_key":"重新生成"`, `"reset_key_stats":"重置统计"`, `"distribution_key":"Key 名称"`, `"copy":"复制"`, `"copied":"已复制"`} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("missing %q in dashboard:\n%s", expected, body)
 		}
@@ -548,7 +559,7 @@ func TestModelTokenDetailsAPI(t *testing.T) {
 		status int
 		body   string
 	}{
-		{"/admin/api/model-token-details?scope=bad&id=" + strconv.FormatInt(provider.ID, 10), http.StatusBadRequest, "scope must be provider or key"},
+		{"/admin/api/model-token-details?scope=bad&id=" + strconv.FormatInt(provider.ID, 10), http.StatusBadRequest, "scope must be provider, key, or user"},
 		{"/admin/api/model-token-details?scope=provider", http.StatusBadRequest, "id is required"},
 		{"/admin/api/model-token-details?scope=provider&id=9999", http.StatusNotFound, "not found"},
 	} {
@@ -570,6 +581,134 @@ func TestModelTokenDetailsAPI(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated details should be rejected, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestUsersAPIAndUserModelDetails(t *testing.T) {
+	handler, router := testAdmin(t)
+	loginRecorder := httptest.NewRecorder()
+	if err := handler.sessions.Create(loginRecorder, 1, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	var cookies []*http.Cookie
+	var csrf string
+	for _, cookie := range loginRecorder.Result().Cookies() {
+		if cookie.Name == auth.SessionCookie || cookie.Name == auth.CSRFCookie {
+			cookies = append(cookies, cookie)
+		}
+		if cookie.Name == auth.CSRFCookie {
+			csrf = cookie.Value
+		}
+	}
+	user, err := handler.store.CreateConsumerUser(context.Background(), "customer@example.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/users", nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected users status: %d %s", rec.Code, rec.Body.String())
+	}
+	var users []store.ConsumerUser
+	if err := json.Unmarshal(rec.Body.Bytes(), &users); err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 1 || users[0].Email != "customer@example.com" || users[0].Status != store.ConsumerStatusPending {
+		t.Fatalf("unexpected users response: %#v", users)
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/admin/api/users", strings.NewReader(`{"id":`+strconv.FormatInt(user.ID, 10)+`,"status":"enabled","quota_total_tokens":1000}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("update without csrf should be rejected: %d %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/admin/api/users", strings.NewReader(`{"id":`+strconv.FormatInt(user.ID, 10)+`,"status":"enabled","quota_total_tokens":1000}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected update status: %d %s", rec.Code, rec.Body.String())
+	}
+	var updated store.ConsumerUser
+	if err := json.Unmarshal(rec.Body.Bytes(), &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != store.ConsumerStatusEnabled || updated.QuotaTotalTokens != 1000 || updated.QuotaRemainingTokens != 1000 {
+		t.Fatalf("unexpected updated user: %#v", updated)
+	}
+
+	provider, err := handler.store.CreateProvider(context.Background(), store.ProviderInput{Name: "provider", Protocol: "openai", BaseAPI: "https://api.example/v1", APIKeyCipher: "cipher", DefaultModel: "model-a", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := handler.store.CreateConsumerDistributionKey(context.Background(), user.ID, "customer-key", "sk-customer", "hash-customer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID, keyID, userID := provider.ID, key.ID, user.ID
+	if err := handler.store.RecordRequest(context.Background(), store.RequestLog{
+		Protocol:            "openai",
+		Model:               "model-a",
+		ProviderID:          &providerID,
+		DistributionKeyID:   &keyID,
+		DistributionKeyName: key.Name,
+		ConsumerUserID:      &userID,
+		ConsumerEmail:       "customer@example.com",
+		StatusCode:          200,
+		LatencyMS:           1,
+		InputTokens:         10,
+		OutputTokens:        5,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/model-token-details?scope=user&id="+strconv.FormatInt(user.ID, 10), nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected user detail status: %d %s", rec.Code, rec.Body.String())
+	}
+	var report store.ModelTokenDetailReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Scope != "user" || report.Name != "customer@example.com" || report.Totals.TotalTokens != 15 {
+		t.Fatalf("unexpected user report: %#v", report)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/logs?q=customer%40example.com", nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected logs status: %d %s", rec.Code, rec.Body.String())
+	}
+	var page logsPage
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 || page.Items[0].ConsumerEmail != "customer@example.com" {
+		t.Fatalf("logs were not searchable by user: %#v", page)
 	}
 }
 

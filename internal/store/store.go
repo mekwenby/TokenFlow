@@ -23,6 +23,29 @@ type AdminUser struct {
 	PasswordHash string `json:"-"`
 }
 
+const (
+	ConsumerStatusPending  = "pending"
+	ConsumerStatusEnabled  = "enabled"
+	ConsumerStatusDisabled = "disabled"
+)
+
+type ConsumerUser struct {
+	ID                   int64      `json:"id"`
+	Email                string     `json:"email"`
+	PasswordHash         string     `json:"-"`
+	Status               string     `json:"status"`
+	QuotaTotalTokens     int64      `json:"quota_total_tokens"`
+	QuotaUsedTokens      int64      `json:"quota_used_tokens"`
+	QuotaRemainingTokens int64      `json:"quota_remaining_tokens"`
+	RequestCount         int64      `json:"request_count"`
+	InputTokens          int64      `json:"input_tokens"`
+	CacheReadTokens      int64      `json:"cache_read_tokens"`
+	OutputTokens         int64      `json:"output_tokens"`
+	LastUsedAt           *time.Time `json:"last_used_at,omitempty"`
+	CreatedAt            time.Time  `json:"created_at"`
+	UpdatedAt            time.Time  `json:"updated_at"`
+}
+
 type Provider struct {
 	ID              int64      `json:"id"`
 	Name            string     `json:"name"`
@@ -55,6 +78,8 @@ type ModelMapping struct {
 
 type DistributionKey struct {
 	ID              int64      `json:"id"`
+	ConsumerUserID  *int64     `json:"consumer_user_id,omitempty"`
+	ConsumerEmail   string     `json:"consumer_email,omitempty"`
 	Name            string     `json:"name"`
 	Prefix          string     `json:"prefix"`
 	KeyHash         string     `json:"-"`
@@ -76,6 +101,8 @@ type RequestLog struct {
 	ProviderName        string    `json:"provider_name,omitempty"`
 	DistributionKeyID   *int64    `json:"distribution_key_id,omitempty"`
 	DistributionKeyName string    `json:"distribution_key_name,omitempty"`
+	ConsumerUserID      *int64    `json:"consumer_user_id,omitempty"`
+	ConsumerEmail       string    `json:"consumer_email,omitempty"`
 	StatusCode          int       `json:"status_code"`
 	LatencyMS           int64     `json:"latency_ms"`
 	InputTokens         int64     `json:"input_tokens"`
@@ -93,6 +120,8 @@ type Stats struct {
 	OutputTokens  int64 `json:"output_tokens"`
 	ActiveKeys    int64 `json:"active_keys"`
 	Providers     int64 `json:"providers"`
+	ActiveUsers   int64 `json:"active_users"`
+	PendingUsers  int64 `json:"pending_users"`
 }
 
 type TokenUsageReport struct {
@@ -161,6 +190,8 @@ var (
 	ErrNotFound          = errors.New("not found")
 	ErrInvalidUsageRange = errors.New("invalid token usage range")
 	ErrInvalidModelScope = errors.New("invalid model token detail scope")
+	ErrInvalidUserStatus = errors.New("invalid consumer user status")
+	ErrQuotaExceeded     = errors.New("quota exceeded")
 )
 
 func Open(path string) (*Store, error) {
@@ -190,6 +221,21 @@ func (s *Store) Migrate(ctx context.Context) error {
 			password_hash TEXT NOT NULL,
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`CREATE TABLE IF NOT EXISTS consumer_users (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+			password_hash TEXT NOT NULL,
+			status TEXT NOT NULL CHECK(status IN ('pending', 'enabled', 'disabled')) DEFAULT 'pending',
+			quota_total_tokens INTEGER NOT NULL DEFAULT 0,
+			quota_used_tokens INTEGER NOT NULL DEFAULT 0,
+			request_count INTEGER NOT NULL DEFAULT 0,
+			input_tokens INTEGER NOT NULL DEFAULT 0,
+			cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+			output_tokens INTEGER NOT NULL DEFAULT 0,
+			last_used_at TEXT,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
 		`CREATE TABLE IF NOT EXISTS providers (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL UNIQUE,
@@ -212,6 +258,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		)`,
 		`CREATE TABLE IF NOT EXISTS distribution_keys (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			consumer_user_id INTEGER REFERENCES consumer_users(id) ON DELETE CASCADE,
 			name TEXT NOT NULL,
 			prefix TEXT NOT NULL,
 			key_hash TEXT NOT NULL UNIQUE,
@@ -230,6 +277,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 			provider_id INTEGER REFERENCES providers(id) ON DELETE SET NULL,
 			distribution_key_id INTEGER REFERENCES distribution_keys(id) ON DELETE SET NULL,
 			distribution_key_name TEXT NOT NULL DEFAULT '',
+			consumer_user_id INTEGER REFERENCES consumer_users(id) ON DELETE SET NULL,
+			consumer_user_email TEXT NOT NULL DEFAULT '',
 			status_code INTEGER NOT NULL,
 			latency_ms INTEGER NOT NULL,
 			input_tokens INTEGER NOT NULL DEFAULT 0,
@@ -252,18 +301,18 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureRequestLogCacheColumns(ctx); err != nil {
 		return err
 	}
-	if err := s.ensureDistributionKeyCacheColumn(ctx); err != nil {
+	if err := s.ensureDistributionKeyConsumerColumn(ctx); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (s *Store) ensureDistributionKeyCacheColumn(ctx context.Context) error {
+func (s *Store) ensureDistributionKeyConsumerColumn(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(distribution_keys)`)
 	if err != nil {
 		return err
 	}
-	hasCacheReadTokens := false
+	columns := map[string]bool{}
 	for rows.Next() {
 		var cid int
 		var name, typ string
@@ -274,17 +323,23 @@ func (s *Store) ensureDistributionKeyCacheColumn(ctx context.Context) error {
 			rows.Close()
 			return err
 		}
-		if name == "cache_read_tokens" {
-			hasCacheReadTokens = true
-		}
+		columns[name] = true
 	}
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	if !hasCacheReadTokens {
+	if !columns["cache_read_tokens"] {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE distribution_keys ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return err
 		}
+	}
+	if !columns["consumer_user_id"] {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE distribution_keys ADD COLUMN consumer_user_id INTEGER REFERENCES consumer_users(id) ON DELETE CASCADE`); err != nil {
+			return err
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_distribution_keys_consumer_user_id ON distribution_keys(consumer_user_id)`); err != nil {
+		return err
 	}
 	return nil
 }
@@ -330,7 +385,20 @@ func (s *Store) ensureRequestLogCacheColumns(ctx context.Context) error {
 			return err
 		}
 	}
+	if !columns["consumer_user_id"] {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE request_logs ADD COLUMN consumer_user_id INTEGER REFERENCES consumer_users(id) ON DELETE SET NULL`); err != nil {
+			return err
+		}
+	}
+	if !columns["consumer_user_email"] {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE request_logs ADD COLUMN consumer_user_email TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
 	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_request_logs_distribution_key_id ON request_logs(distribution_key_id)`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_request_logs_consumer_user_id ON request_logs(consumer_user_id)`); err != nil {
 		return err
 	}
 	return nil
@@ -418,6 +486,98 @@ func (s *Store) AdminByUsername(ctx context.Context, username string) (AdminUser
 		return user, ErrNotFound
 	}
 	return user, err
+}
+
+func (s *Store) CreateConsumerUser(ctx context.Context, email, passwordHash string) (ConsumerUser, error) {
+	email = normalizeEmail(email)
+	res, err := s.db.ExecContext(ctx, `INSERT INTO consumer_users(email, password_hash, status) VALUES(?, ?, ?)`, email, passwordHash, ConsumerStatusPending)
+	if err != nil {
+		return ConsumerUser{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return ConsumerUser{}, err
+	}
+	return s.ConsumerUser(ctx, id)
+}
+
+func (s *Store) ConsumerUser(ctx context.Context, id int64) (ConsumerUser, error) {
+	var user ConsumerUser
+	var last sql.NullString
+	var createdAt, updatedAt string
+	err := s.db.QueryRowContext(ctx, `SELECT id, email, password_hash, status, quota_total_tokens, quota_used_tokens, request_count, input_tokens, cache_read_tokens, output_tokens, last_used_at, created_at, updated_at
+		FROM consumer_users WHERE id = ?`, id).
+		Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Status, &user.QuotaTotalTokens, &user.QuotaUsedTokens, &user.RequestCount, &user.InputTokens, &user.CacheReadTokens, &user.OutputTokens, &last, &createdAt, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return user, ErrNotFound
+	}
+	if err != nil {
+		return user, err
+	}
+	user = hydrateConsumerUser(user, last, createdAt, updatedAt)
+	return user, nil
+}
+
+func (s *Store) ConsumerUserByEmail(ctx context.Context, email string) (ConsumerUser, error) {
+	var user ConsumerUser
+	var last sql.NullString
+	var createdAt, updatedAt string
+	err := s.db.QueryRowContext(ctx, `SELECT id, email, password_hash, status, quota_total_tokens, quota_used_tokens, request_count, input_tokens, cache_read_tokens, output_tokens, last_used_at, created_at, updated_at
+		FROM consumer_users WHERE email = ?`, normalizeEmail(email)).
+		Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Status, &user.QuotaTotalTokens, &user.QuotaUsedTokens, &user.RequestCount, &user.InputTokens, &user.CacheReadTokens, &user.OutputTokens, &last, &createdAt, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return user, ErrNotFound
+	}
+	if err != nil {
+		return user, err
+	}
+	user = hydrateConsumerUser(user, last, createdAt, updatedAt)
+	return user, nil
+}
+
+func (s *Store) ConsumerUsers(ctx context.Context) ([]ConsumerUser, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, email, password_hash, status, quota_total_tokens, quota_used_tokens, request_count, input_tokens, cache_read_tokens, output_tokens, last_used_at, created_at, updated_at
+		FROM consumer_users
+		ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'enabled' THEN 1 ELSE 2 END, created_at DESC, id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var users []ConsumerUser
+	for rows.Next() {
+		var user ConsumerUser
+		var last sql.NullString
+		var createdAt, updatedAt string
+		if err := rows.Scan(&user.ID, &user.Email, &user.PasswordHash, &user.Status, &user.QuotaTotalTokens, &user.QuotaUsedTokens, &user.RequestCount, &user.InputTokens, &user.CacheReadTokens, &user.OutputTokens, &last, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		users = append(users, hydrateConsumerUser(user, last, createdAt, updatedAt))
+	}
+	if users == nil {
+		users = []ConsumerUser{}
+	}
+	return users, rows.Err()
+}
+
+func (s *Store) UpdateConsumerUser(ctx context.Context, id int64, status string, quotaTotalTokens int64) (ConsumerUser, error) {
+	status = strings.TrimSpace(status)
+	if !validConsumerStatus(status) {
+		return ConsumerUser{}, ErrInvalidUserStatus
+	}
+	if quotaTotalTokens < 0 {
+		quotaTotalTokens = 0
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE consumer_users SET status = ?, quota_total_tokens = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, status, quotaTotalTokens, id)
+	if err != nil {
+		return ConsumerUser{}, err
+	}
+	return s.ConsumerUser(ctx, id)
+}
+
+func (s *Store) UpdateConsumerUsage(ctx context.Context, userID, inputTokens, cacheReadTokens, outputTokens int64) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE consumer_users SET request_count = request_count + 1, input_tokens = input_tokens + ?, cache_read_tokens = cache_read_tokens + ?, output_tokens = output_tokens + ?, quota_used_tokens = quota_used_tokens + ?, last_used_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		inputTokens, cacheReadTokens, outputTokens, inputTokens+outputTokens, userID)
+	return err
 }
 
 func (s *Store) CreateProvider(ctx context.Context, input ProviderInput) (Provider, error) {
@@ -665,6 +825,18 @@ func (s *Store) CreateDistributionKey(ctx context.Context, name, prefix, hash st
 	return s.DistributionKey(ctx, id)
 }
 
+func (s *Store) CreateConsumerDistributionKey(ctx context.Context, consumerUserID int64, name, prefix, hash string) (DistributionKey, error) {
+	res, err := s.db.ExecContext(ctx, `INSERT INTO distribution_keys(consumer_user_id, name, prefix, key_hash, enabled) VALUES(?, ?, ?, ?, 1)`, consumerUserID, name, prefix, hash)
+	if err != nil {
+		return DistributionKey{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return DistributionKey{}, err
+	}
+	return s.DistributionKey(ctx, id)
+}
+
 func (s *Store) UpdateDistributionKey(ctx context.Context, id int64, name string, enabled bool) (DistributionKey, error) {
 	_, err := s.db.ExecContext(ctx, `UPDATE distribution_keys SET name = ?, enabled = ? WHERE id = ?`, name, boolInt(enabled), id)
 	if err != nil {
@@ -673,10 +845,40 @@ func (s *Store) UpdateDistributionKey(ctx context.Context, id int64, name string
 	return s.DistributionKey(ctx, id)
 }
 
+func (s *Store) UpdateConsumerDistributionKey(ctx context.Context, consumerUserID, id int64, name string, enabled bool) (DistributionKey, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE distribution_keys SET name = ?, enabled = ? WHERE id = ? AND consumer_user_id = ?`, name, boolInt(enabled), id, consumerUserID)
+	if err != nil {
+		return DistributionKey{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return DistributionKey{}, err
+	}
+	if affected == 0 {
+		return DistributionKey{}, ErrNotFound
+	}
+	return s.DistributionKey(ctx, id)
+}
+
 func (s *Store) ResetDistributionKey(ctx context.Context, id int64, prefix, hash string) (DistributionKey, error) {
 	_, err := s.db.ExecContext(ctx, `UPDATE distribution_keys SET prefix = ?, key_hash = ? WHERE id = ?`, prefix, hash, id)
 	if err != nil {
 		return DistributionKey{}, err
+	}
+	return s.DistributionKey(ctx, id)
+}
+
+func (s *Store) ResetConsumerDistributionKey(ctx context.Context, consumerUserID, id int64, prefix, hash string) (DistributionKey, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE distribution_keys SET prefix = ?, key_hash = ? WHERE id = ? AND consumer_user_id = ?`, prefix, hash, id, consumerUserID)
+	if err != nil {
+		return DistributionKey{}, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return DistributionKey{}, err
+	}
+	if affected == 0 {
+		return DistributionKey{}, ErrNotFound
 	}
 	return s.DistributionKey(ctx, id)
 }
@@ -694,42 +896,82 @@ func (s *Store) DeleteDistributionKey(ctx context.Context, id int64) error {
 	return err
 }
 
+func (s *Store) DeleteConsumerDistributionKey(ctx context.Context, consumerUserID, id int64) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM distribution_keys WHERE id = ? AND consumer_user_id = ?`, id, consumerUserID)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) DistributionKey(ctx context.Context, id int64) (DistributionKey, error) {
 	var k DistributionKey
 	var last sql.NullString
 	var createdAt string
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, prefix, key_hash, enabled, request_count, input_tokens, cache_read_tokens, output_tokens, last_used_at, created_at FROM distribution_keys WHERE id = ?`, id).
-		Scan(&k.ID, &k.Name, &k.Prefix, &k.KeyHash, &k.Enabled, &k.RequestCount, &k.InputTokens, &k.CacheReadTokens, &k.OutputTokens, &last, &createdAt)
+	var consumerUserID sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT k.id, k.consumer_user_id, COALESCE(u.email, ''), k.name, k.prefix, k.key_hash, k.enabled, k.request_count, k.input_tokens, k.cache_read_tokens, k.output_tokens, k.last_used_at, k.created_at
+		FROM distribution_keys k
+		LEFT JOIN consumer_users u ON u.id = k.consumer_user_id
+		WHERE k.id = ?`, id).
+		Scan(&k.ID, &consumerUserID, &k.ConsumerEmail, &k.Name, &k.Prefix, &k.KeyHash, &k.Enabled, &k.RequestCount, &k.InputTokens, &k.CacheReadTokens, &k.OutputTokens, &last, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return k, ErrNotFound
+	}
+	if err != nil {
+		return k, err
+	}
+	if consumerUserID.Valid {
+		id := consumerUserID.Int64
+		k.ConsumerUserID = &id
 	}
 	k.CreatedAt = parseDBTime(createdAt)
 	if last.Valid {
 		t := parseDBTime(last.String)
 		k.LastUsedAt = &t
 	}
-	return k, err
+	return k, nil
 }
 
 func (s *Store) DistributionKeyByHash(ctx context.Context, hash string) (DistributionKey, error) {
 	var k DistributionKey
 	var last sql.NullString
 	var createdAt string
-	err := s.db.QueryRowContext(ctx, `SELECT id, name, prefix, key_hash, enabled, request_count, input_tokens, cache_read_tokens, output_tokens, last_used_at, created_at FROM distribution_keys WHERE key_hash = ?`, hash).
-		Scan(&k.ID, &k.Name, &k.Prefix, &k.KeyHash, &k.Enabled, &k.RequestCount, &k.InputTokens, &k.CacheReadTokens, &k.OutputTokens, &last, &createdAt)
+	var consumerUserID sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT k.id, k.consumer_user_id, COALESCE(u.email, ''), k.name, k.prefix, k.key_hash, k.enabled, k.request_count, k.input_tokens, k.cache_read_tokens, k.output_tokens, k.last_used_at, k.created_at
+		FROM distribution_keys k
+		LEFT JOIN consumer_users u ON u.id = k.consumer_user_id
+		WHERE k.key_hash = ?`, hash).
+		Scan(&k.ID, &consumerUserID, &k.ConsumerEmail, &k.Name, &k.Prefix, &k.KeyHash, &k.Enabled, &k.RequestCount, &k.InputTokens, &k.CacheReadTokens, &k.OutputTokens, &last, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return k, ErrNotFound
+	}
+	if err != nil {
+		return k, err
+	}
+	if consumerUserID.Valid {
+		id := consumerUserID.Int64
+		k.ConsumerUserID = &id
 	}
 	k.CreatedAt = parseDBTime(createdAt)
 	if last.Valid {
 		t := parseDBTime(last.String)
 		k.LastUsedAt = &t
 	}
-	return k, err
+	return k, nil
 }
 
 func (s *Store) DistributionKeys(ctx context.Context) ([]DistributionKey, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, prefix, key_hash, enabled, request_count, input_tokens, cache_read_tokens, output_tokens, last_used_at, created_at FROM distribution_keys ORDER BY created_at DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT k.id, k.consumer_user_id, COALESCE(u.email, ''), k.name, k.prefix, k.key_hash, k.enabled, k.request_count, k.input_tokens, k.cache_read_tokens, k.output_tokens, k.last_used_at, k.created_at
+		FROM distribution_keys k
+		LEFT JOIN consumer_users u ON u.id = k.consumer_user_id
+		ORDER BY k.created_at DESC, k.id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -739,8 +981,13 @@ func (s *Store) DistributionKeys(ctx context.Context) ([]DistributionKey, error)
 		var k DistributionKey
 		var last sql.NullString
 		var createdAt string
-		if err := rows.Scan(&k.ID, &k.Name, &k.Prefix, &k.KeyHash, &k.Enabled, &k.RequestCount, &k.InputTokens, &k.CacheReadTokens, &k.OutputTokens, &last, &createdAt); err != nil {
+		var consumerUserID sql.NullInt64
+		if err := rows.Scan(&k.ID, &consumerUserID, &k.ConsumerEmail, &k.Name, &k.Prefix, &k.KeyHash, &k.Enabled, &k.RequestCount, &k.InputTokens, &k.CacheReadTokens, &k.OutputTokens, &last, &createdAt); err != nil {
 			return nil, err
+		}
+		if consumerUserID.Valid {
+			id := consumerUserID.Int64
+			k.ConsumerUserID = &id
 		}
 		k.CreatedAt = parseDBTime(createdAt)
 		if last.Valid {
@@ -748,6 +995,45 @@ func (s *Store) DistributionKeys(ctx context.Context) ([]DistributionKey, error)
 			k.LastUsedAt = &t
 		}
 		keys = append(keys, k)
+	}
+	if keys == nil {
+		keys = []DistributionKey{}
+	}
+	return keys, rows.Err()
+}
+
+func (s *Store) ConsumerDistributionKeys(ctx context.Context, consumerUserID int64) ([]DistributionKey, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT k.id, k.consumer_user_id, COALESCE(u.email, ''), k.name, k.prefix, k.key_hash, k.enabled, k.request_count, k.input_tokens, k.cache_read_tokens, k.output_tokens, k.last_used_at, k.created_at
+		FROM distribution_keys k
+		LEFT JOIN consumer_users u ON u.id = k.consumer_user_id
+		WHERE k.consumer_user_id = ?
+		ORDER BY k.created_at DESC, k.id DESC`, consumerUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []DistributionKey
+	for rows.Next() {
+		var k DistributionKey
+		var last sql.NullString
+		var createdAt string
+		var scannedConsumerUserID sql.NullInt64
+		if err := rows.Scan(&k.ID, &scannedConsumerUserID, &k.ConsumerEmail, &k.Name, &k.Prefix, &k.KeyHash, &k.Enabled, &k.RequestCount, &k.InputTokens, &k.CacheReadTokens, &k.OutputTokens, &last, &createdAt); err != nil {
+			return nil, err
+		}
+		if scannedConsumerUserID.Valid {
+			id := scannedConsumerUserID.Int64
+			k.ConsumerUserID = &id
+		}
+		k.CreatedAt = parseDBTime(createdAt)
+		if last.Valid {
+			t := parseDBTime(last.String)
+			k.LastUsedAt = &t
+		}
+		keys = append(keys, k)
+	}
+	if keys == nil {
+		keys = []DistributionKey{}
 	}
 	return keys, rows.Err()
 }
@@ -767,10 +1053,55 @@ func (s *Store) InsertRequestLog(ctx context.Context, log RequestLog) error {
 	if log.DistributionKeyID != nil {
 		distributionKeyID = *log.DistributionKeyID
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO request_logs(protocol, model, provider_id, distribution_key_id, distribution_key_name, status_code, latency_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, stream)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		log.Protocol, log.Model, providerID, distributionKeyID, log.DistributionKeyName, log.StatusCode, log.LatencyMS, log.InputTokens, log.OutputTokens, log.CacheReadTokens, log.CacheCreationTokens, boolInt(log.Stream))
+	var consumerUserID any
+	if log.ConsumerUserID != nil {
+		consumerUserID = *log.ConsumerUserID
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO request_logs(protocol, model, provider_id, distribution_key_id, distribution_key_name, consumer_user_id, consumer_user_email, status_code, latency_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, stream)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		log.Protocol, log.Model, providerID, distributionKeyID, log.DistributionKeyName, consumerUserID, log.ConsumerEmail, log.StatusCode, log.LatencyMS, log.InputTokens, log.OutputTokens, log.CacheReadTokens, log.CacheCreationTokens, boolInt(log.Stream))
 	return err
+}
+
+func (s *Store) RecordRequest(ctx context.Context, log RequestLog) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var providerID any
+	if log.ProviderID != nil {
+		providerID = *log.ProviderID
+	}
+	var distributionKeyID any
+	if log.DistributionKeyID != nil {
+		distributionKeyID = *log.DistributionKeyID
+	}
+	var consumerUserID any
+	if log.ConsumerUserID != nil {
+		consumerUserID = *log.ConsumerUserID
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO request_logs(protocol, model, provider_id, distribution_key_id, distribution_key_name, consumer_user_id, consumer_user_email, status_code, latency_ms, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, stream)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		log.Protocol, log.Model, providerID, distributionKeyID, log.DistributionKeyName, consumerUserID, log.ConsumerEmail, log.StatusCode, log.LatencyMS, log.InputTokens, log.OutputTokens, log.CacheReadTokens, log.CacheCreationTokens, boolInt(log.Stream)); err != nil {
+		return err
+	}
+	if log.StatusCode >= 200 && log.StatusCode < 300 {
+		if log.DistributionKeyID != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE distribution_keys SET request_count = request_count + 1, input_tokens = input_tokens + ?, cache_read_tokens = cache_read_tokens + ?, output_tokens = output_tokens + ?, last_used_at = CURRENT_TIMESTAMP WHERE id = ?`,
+				log.InputTokens, log.CacheReadTokens, log.OutputTokens, *log.DistributionKeyID); err != nil {
+				return err
+			}
+		}
+		if log.ConsumerUserID != nil {
+			if _, err := tx.ExecContext(ctx, `UPDATE consumer_users SET request_count = request_count + 1, input_tokens = input_tokens + ?, cache_read_tokens = cache_read_tokens + ?, output_tokens = output_tokens + ?, quota_used_tokens = quota_used_tokens + ?, last_used_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+				log.InputTokens, log.CacheReadTokens, log.OutputTokens, log.InputTokens+log.OutputTokens, *log.ConsumerUserID); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Logs(ctx context.Context, limit, offset int) ([]RequestLog, error) {
@@ -781,10 +1112,11 @@ func (s *Store) LogsSearch(ctx context.Context, limit, offset int, search string
 	limit, offset = normalizeLogPagination(limit, offset)
 	where, args := logSearchWhere(search)
 	args = append(args, limit, offset)
-	rows, err := s.db.QueryContext(ctx, `SELECT l.id, l.protocol, l.model, l.provider_id, COALESCE(p.name, ''), l.distribution_key_id, COALESCE(NULLIF(l.distribution_key_name, ''), k.name, ''), l.status_code, l.latency_ms, l.input_tokens, l.output_tokens, l.cache_read_tokens, l.cache_creation_tokens, l.stream, l.created_at
+	rows, err := s.db.QueryContext(ctx, `SELECT l.id, l.protocol, l.model, l.provider_id, COALESCE(p.name, ''), l.distribution_key_id, COALESCE(NULLIF(l.distribution_key_name, ''), k.name, ''), l.consumer_user_id, COALESCE(NULLIF(l.consumer_user_email, ''), u.email, ''), l.status_code, l.latency_ms, l.input_tokens, l.output_tokens, l.cache_read_tokens, l.cache_creation_tokens, l.stream, l.created_at
 		FROM request_logs l
 		LEFT JOIN providers p ON p.id = l.provider_id
 		LEFT JOIN distribution_keys k ON k.id = l.distribution_key_id
+		LEFT JOIN consumer_users u ON u.id = l.consumer_user_id
 		`+where+`
 		ORDER BY l.created_at DESC, l.id DESC LIMIT ? OFFSET ?`, args...)
 	if err != nil {
@@ -796,8 +1128,9 @@ func (s *Store) LogsSearch(ctx context.Context, limit, offset int, search string
 		var l RequestLog
 		var providerID sql.NullInt64
 		var distributionKeyID sql.NullInt64
+		var consumerUserID sql.NullInt64
 		var createdAt string
-		if err := rows.Scan(&l.ID, &l.Protocol, &l.Model, &providerID, &l.ProviderName, &distributionKeyID, &l.DistributionKeyName, &l.StatusCode, &l.LatencyMS, &l.InputTokens, &l.OutputTokens, &l.CacheReadTokens, &l.CacheCreationTokens, &l.Stream, &createdAt); err != nil {
+		if err := rows.Scan(&l.ID, &l.Protocol, &l.Model, &providerID, &l.ProviderName, &distributionKeyID, &l.DistributionKeyName, &consumerUserID, &l.ConsumerEmail, &l.StatusCode, &l.LatencyMS, &l.InputTokens, &l.OutputTokens, &l.CacheReadTokens, &l.CacheCreationTokens, &l.Stream, &createdAt); err != nil {
 			return nil, err
 		}
 		l.CreatedAt = parseDBTime(createdAt)
@@ -811,6 +1144,10 @@ func (s *Store) LogsSearch(ctx context.Context, limit, offset int, search string
 		if distributionKeyID.Valid {
 			id := distributionKeyID.Int64
 			l.DistributionKeyID = &id
+		}
+		if consumerUserID.Valid {
+			id := consumerUserID.Int64
+			l.ConsumerUserID = &id
 		}
 		logs = append(logs, l)
 	}
@@ -828,6 +1165,7 @@ func (s *Store) LogCountSearch(ctx context.Context, search string) (int64, error
 		FROM request_logs l
 		LEFT JOIN providers p ON p.id = l.provider_id
 		LEFT JOIN distribution_keys k ON k.id = l.distribution_key_id
+		LEFT JOIN consumer_users u ON u.id = l.consumer_user_id
 		`+where, args...).Scan(&total)
 	return total, err
 }
@@ -853,6 +1191,13 @@ func (s *Store) ModelTokenDetails(ctx context.Context, scope string, id int64) (
 		}
 		report.Name = key.Name
 		filterColumn = "distribution_key_id"
+	case "user":
+		user, err := s.ConsumerUser(ctx, id)
+		if err != nil {
+			return ModelTokenDetailReport{}, err
+		}
+		report.Name = user.Email
+		filterColumn = "consumer_user_id"
 	default:
 		return ModelTokenDetailReport{}, ErrInvalidModelScope
 	}
@@ -967,6 +1312,12 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM providers WHERE enabled = 1`).Scan(&stats.Providers); err != nil {
 		return stats, err
 	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM consumer_users WHERE status = ?`, ConsumerStatusEnabled).Scan(&stats.ActiveUsers); err != nil {
+		return stats, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM consumer_users WHERE status = ?`, ConsumerStatusPending).Scan(&stats.PendingUsers); err != nil {
+		return stats, err
+	}
 	return stats, nil
 }
 
@@ -994,8 +1345,8 @@ func logSearchWhere(search string) (string, []any) {
 		var termClauses []string
 		for _, term := range group {
 			pattern := "%" + escapeLike(term) + "%"
-			termClauses = append(termClauses, `(l.model LIKE ? ESCAPE '\' OR COALESCE(p.name, '') LIKE ? ESCAPE '\' OR COALESCE(NULLIF(l.distribution_key_name, ''), k.name, '') LIKE ? ESCAPE '\')`)
-			args = append(args, pattern, pattern, pattern)
+			termClauses = append(termClauses, `(l.model LIKE ? ESCAPE '\' OR COALESCE(p.name, '') LIKE ? ESCAPE '\' OR COALESCE(NULLIF(l.distribution_key_name, ''), k.name, '') LIKE ? ESCAPE '\' OR COALESCE(NULLIF(l.consumer_user_email, ''), u.email, '') LIKE ? ESCAPE '\')`)
+			args = append(args, pattern, pattern, pattern, pattern)
 		}
 		if len(termClauses) > 0 {
 			groupClauses = append(groupClauses, "("+strings.Join(termClauses, " AND ")+")")
@@ -1070,6 +1421,30 @@ func parseDBTime(value string) time.Time {
 		}
 	}
 	return time.Time{}
+}
+
+func hydrateConsumerUser(user ConsumerUser, last sql.NullString, createdAt, updatedAt string) ConsumerUser {
+	user.CreatedAt = parseDBTime(createdAt)
+	user.UpdatedAt = parseDBTime(updatedAt)
+	user.QuotaRemainingTokens = user.QuotaTotalTokens - user.QuotaUsedTokens
+	if last.Valid {
+		t := parseDBTime(last.String)
+		user.LastUsedAt = &t
+	}
+	return user
+}
+
+func normalizeEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
+func validConsumerStatus(status string) bool {
+	switch status {
+	case ConsumerStatusPending, ConsumerStatusEnabled, ConsumerStatusDisabled:
+		return true
+	default:
+		return false
+	}
 }
 
 func encodeModels(models []string, defaultModel string) string {
