@@ -13,6 +13,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"tokenflow/internal/chat"
+	"tokenflow/internal/secret"
 	"tokenflow/internal/store"
 )
 
@@ -150,6 +152,314 @@ func TestRegisterLoginAndConsumerKeys(t *testing.T) {
 	}
 }
 
+func TestAccountLogsAPIIsScopedAndSearchable(t *testing.T) {
+	handler, router := testAccount(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/account/api/logs", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated logs should be rejected: %d %s", rec.Code, rec.Body.String())
+	}
+
+	user, err := handler.store.CreateConsumerUser(context.Background(), "viewer@example.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err = handler.store.UpdateConsumerUser(context.Background(), user.ID, store.ConsumerStatusEnabled, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := handler.store.CreateConsumerUser(context.Background(), "other@example.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err = handler.store.UpdateConsumerUser(context.Background(), other.ID, store.ConsumerStatusEnabled, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := handler.store.CreateConsumerDistributionKey(context.Background(), user.ID, "Alpha % Key", "sk-alpha", "hash-alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKey, err := handler.store.CreateConsumerDistributionKey(context.Background(), other.ID, "Other Key", "sk-other", "hash-other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyID, otherKeyID := key.ID, otherKey.ID
+	userID, otherID := user.ID, other.ID
+	for _, log := range []store.RequestLog{
+		{Protocol: "openai", Model: "model-a", UpstreamModel: "hidden-upstream", DistributionKeyID: &keyID, DistributionKeyName: key.Name, ConsumerUserID: &userID, ConsumerEmail: user.Email, StatusCode: http.StatusOK, LatencyMS: 11, InputTokens: 10, CacheReadTokens: 4, CacheCreationTokens: 2, OutputTokens: 3, Stream: true},
+		{Protocol: "anthropic", Model: "model-b", UpstreamModel: "hidden-upstream-b", DistributionKeyID: &keyID, DistributionKeyName: "Beta Key", ConsumerUserID: &userID, ConsumerEmail: user.Email, StatusCode: http.StatusBadGateway, LatencyMS: 22, InputTokens: 1, OutputTokens: 2},
+		{Protocol: "openai", Model: "model-a", DistributionKeyID: &otherKeyID, DistributionKeyName: otherKey.Name, ConsumerUserID: &otherID, ConsumerEmail: other.Email, StatusCode: http.StatusOK, LatencyMS: 33},
+	} {
+		if err := handler.store.RecordRequest(context.Background(), log); err != nil {
+			t.Fatal(err)
+		}
+	}
+	loginRecorder := httptest.NewRecorder()
+	if err := handler.sessions.Create(loginRecorder, user.ID, user.Email); err != nil {
+		t.Fatal(err)
+	}
+	cookies, _ := accountCookies(loginRecorder)
+
+	req = httptest.NewRequest(http.MethodGet, "/account/api/logs?limit=999&offset=-2", nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected logs status: %d %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, hidden := range []string{"provider_name", "upstream_model", "consumer_email", "hidden-upstream", "other@example.com"} {
+		if strings.Contains(body, hidden) {
+			t.Fatalf("account logs response leaked %q: %s", hidden, body)
+		}
+	}
+	var page accountLogsPage
+	if err := json.Unmarshal([]byte(body), &page); err != nil {
+		t.Fatal(err)
+	}
+	if page.Limit != 200 || page.Offset != 0 || page.Total != 2 || len(page.Items) != 2 {
+		t.Fatalf("unexpected logs page metadata: %#v", page)
+	}
+	if page.Items[0].Model != "model-b" || page.Items[0].StatusCode != http.StatusBadGateway || page.Items[1].DistributionKeyName != key.Name {
+		t.Fatalf("unexpected logs order or fields: %#v", page.Items)
+	}
+	if page.Items[1].CacheReadTokens != 4 || page.Items[1].CacheCreationTokens != 2 || page.Items[1].CacheHitRate < 0.39 || page.Items[1].CacheHitRate > 0.41 || !page.Items[1].Stream {
+		t.Fatalf("cache and stream fields were not returned: %#v", page.Items[1])
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/account/api/logs?q="+url.QueryEscape("Alpha % & model-a"), nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected filtered logs status: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].DistributionKeyName != key.Name {
+		t.Fatalf("AND search with LIKE escaping returned unexpected page: %#v", page)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/account/api/logs?q="+url.QueryEscape("Beta | Other"), nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected OR filtered logs status: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].DistributionKeyName != "Beta Key" {
+		t.Fatalf("OR search should stay scoped to current user: %#v", page)
+	}
+}
+
+func TestAccountChatAPIRequiresSessionCSRFAndQuota(t *testing.T) {
+	handler, router := testAccount(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/account/chat", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/account/login" {
+		t.Fatalf("unauthenticated chat page should redirect: %d %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/account/api/chat/models", nil)
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated chat API should be rejected: %d %s", rec.Code, rec.Body.String())
+	}
+
+	user, err := handler.store.CreateConsumerUser(context.Background(), "chat-api@example.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err = handler.store.UpdateConsumerUser(context.Background(), user.ID, store.ConsumerStatusEnabled, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loginRecorder := httptest.NewRecorder()
+	if err := handler.sessions.Create(loginRecorder, user.ID, user.Email); err != nil {
+		t.Fatal(err)
+	}
+	cookies, csrf := accountCookies(loginRecorder)
+
+	req = httptest.NewRequest(http.MethodGet, "/account/api/chat/models", nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"models"`) || !strings.Contains(rec.Body.String(), `"default_system_prompt"`) || !strings.Contains(rec.Body.String(), `"max_tool_calls"`) {
+		t.Fatalf("unexpected chat models response: %d %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/account/chat", nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	for _, expected := range []string{`class="admin-page chat-page"`, `data-chat-root`, `data-chat-lang=`, `data-chat-api-prefix="/account/api/chat"`, `data-chat-csrf-cookie="gateway_account_csrf"`, `data-chat-settings-writable="false"`, `data-chat-process-shell`, `data-chat-process-top`, `data-chat-process-bottom`, `data-chat-process-collapse`, `data-chat-process-reopen`, `data-chat-user-avatar`, `data-chat-assistant-avatar`, `data-chat-max-tool-calls`, `data-chat-default-system-prompt`, `data-chat-auto-title`, `chat/app.js`, `href="/account"`} {
+		if rec.Code != http.StatusOK || !strings.Contains(body, expected) {
+			t.Fatalf("missing %q in account chat page: status=%d body=%s", expected, rec.Code, body)
+		}
+	}
+	if strings.Contains(body, "account/app.js") || strings.Contains(body, `id="account-api-section"`) {
+		t.Fatalf("account chat page should not render dashboard sections/scripts:\n%s", body)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/account/api/chat/conversations", strings.NewReader(`{"title":"test"}`))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("chat conversation create without CSRF should fail: %d %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/account/api/chat/settings", nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"max_tool_calls":6`) {
+		t.Fatalf("unexpected chat settings response: %d %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPatch, "/account/api/chat/settings", strings.NewReader(`{"max_tool_calls":8}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code == http.StatusOK {
+		t.Fatalf("account chat settings patch should not be allowed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/account/api/chat/conversations", strings.NewReader(`{"title":"test","model":"model-a","thinking_effort":"low","user_avatar":"🧑‍🚀","assistant_avatar":"✨"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected chat conversation create status: %d %s", rec.Code, rec.Body.String())
+	}
+	var conv store.ChatConversation
+	if err := json.Unmarshal(rec.Body.Bytes(), &conv); err != nil {
+		t.Fatal(err)
+	}
+	if conv.ConsumerUserID == nil || *conv.ConsumerUserID != user.ID || conv.AdminUserID != nil || conv.UserAvatar != "🧑‍🚀" || conv.AssistantAvatar != "✨" {
+		t.Fatalf("conversation was not scoped to account user: %#v", conv)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/account/api/chat/conversations/"+strconv.FormatInt(conv.ID, 10)+"/title", nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("chat title generation without CSRF should fail: %d %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/account/api/chat/conversations/"+strconv.FormatInt(conv.ID, 10)+"/title", nil)
+	req.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "no messages") {
+		t.Fatalf("empty chat title generation should return 400: %d %s", rec.Code, rec.Body.String())
+	}
+
+	other, err := handler.store.CreateConsumerUser(context.Background(), "other-chat-api@example.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err = handler.store.UpdateConsumerUser(context.Background(), other.ID, store.ConsumerStatusEnabled, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherRecorder := httptest.NewRecorder()
+	if err := handler.sessions.Create(otherRecorder, other.ID, other.Email); err != nil {
+		t.Fatal(err)
+	}
+	otherCookies, otherCSRF := accountCookies(otherRecorder)
+	req = httptest.NewRequest(http.MethodGet, "/account/api/chat/conversations/"+strconv.FormatInt(conv.ID, 10), nil)
+	for _, cookie := range otherCookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("other account user should not read conversation: %d %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/account/api/chat/conversations/"+strconv.FormatInt(conv.ID, 10)+"/title", nil)
+	req.Header.Set("X-CSRF-Token", otherCSRF)
+	for _, cookie := range otherCookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("other account user should not generate title: %d %s", rec.Code, rec.Body.String())
+	}
+
+	limited, err := handler.store.CreateConsumerUser(context.Background(), "limited-chat-api@example.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	limited, err = handler.store.UpdateConsumerUser(context.Background(), limited.ID, store.ConsumerStatusEnabled, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limitedOwner := store.ChatOwner{Type: store.ChatOwnerConsumer, ID: limited.ID, Name: limited.Email}
+	limitedConv, err := handler.store.CreateChatConversation(context.Background(), limitedOwner, "limited", "model-a", "medium", "", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	limitedRecorder := httptest.NewRecorder()
+	if err := handler.sessions.Create(limitedRecorder, limited.ID, limited.Email); err != nil {
+		t.Fatal(err)
+	}
+	limitedCookies, limitedCSRF := accountCookies(limitedRecorder)
+	req = httptest.NewRequest(http.MethodPost, "/account/api/chat/conversations/"+strconv.FormatInt(limitedConv.ID, 10)+"/messages", strings.NewReader(`{"content":"hello","model":"model-a"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", limitedCSRF)
+	for _, cookie := range limitedCookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("quota exceeded chat send should return 429 before streaming: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestAccountPagesUseLanguageAndSharedScripts(t *testing.T) {
 	handler, router := testAccount(t)
 
@@ -195,9 +505,17 @@ func TestAccountPagesUseLanguageAndSharedScripts(t *testing.T) {
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	body = rec.Body.String()
-	for _, expected := range []string{`<html lang="zh-CN">`, "使用情况", "API 地址", "创建 Key", `window.__ACCOUNT_LANG__ = "zh-CN"`, `window.__ACCOUNT_I18N__`, `"copied":"已复制"`, "common.js", "account.js"} {
+	for _, expected := range []string{`<html lang="zh-CN">`, "使用情况", "API 地址", "创建 Key", `id="account-logs-search-form"`, `id="account-logs"`, `href="#account-logs-section"`, `window.__ACCOUNT_LANG__ = "zh-CN"`, `window.__ACCOUNT_I18N__`, `"recent_requests"`, `"copied":"已复制"`, "account/app.js"} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("missing %q in account dashboard:\n%s", expected, body)
+		}
+	}
+	if !strings.Contains(body, `href="/account/chat"`) {
+		t.Fatalf("account dashboard should expose chat from the top bar:\n%s", body)
+	}
+	for _, unexpected := range []string{`data-chat-root`, `account-chat-section`, `chat/app.js`} {
+		if strings.Contains(body, unexpected) {
+			t.Fatalf("account dashboard should not include %q:\n%s", unexpected, body)
 		}
 	}
 }
@@ -287,12 +605,18 @@ func accountCookies(rec *httptest.ResponseRecorder) ([]*http.Cookie, string) {
 
 func testAccount(t *testing.T) (*Handler, chi.Router) {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "gateway.db"))
+	dir := t.TempDir()
+	box, err := secret.Load(filepath.Join(dir, "app.secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(dir, "gateway.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	handler := New(st)
+	handler.SetChatService(chat.NewService(st, box, ""))
 	router := chi.NewRouter()
 	handler.Register(router)
 	return handler, router

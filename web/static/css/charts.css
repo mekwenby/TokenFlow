@@ -1,0 +1,133 @@
+/* === Usage Charts === */
+.usage-chart {
+  min-width: 0;
+}
+
+.usage-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin-bottom: var(--space-sm);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.usage-summary strong {
+  color: var(--text);
+}
+
+.usage-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm) 14px;
+}
+
+.usage-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.usage-color {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-pill);
+  flex: 0 0 auto;
+}
+
+.usage-empty {
+  display: grid;
+  place-items: center;
+  min-height: 220px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* === SVG Charts === */
+.chart-svg {
+  display: block;
+  width: 100%;
+  min-height: 250px;
+  overflow: hidden;
+}
+
+.chart-grid {
+  stroke: var(--chart-grid);
+  stroke-width: 1;
+}
+
+.chart-axis,
+.chart-axis-line {
+  fill: var(--muted);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.chart-axis-line {
+  stroke: var(--border-strong);
+  stroke-width: 1;
+}
+
+.chart-line {
+  fill: none;
+  stroke-width: 2.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chart-dot {
+  stroke: var(--surface);
+  stroke-width: 1.7;
+}
+
+/* === Detail Modal Charts === */
+.detail-chart-panel {
+  min-width: 0;
+  margin-bottom: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-muted);
+  padding: var(--space-md);
+}
+
+.detail-chart-scroll {
+  overflow-x: auto;
+}
+
+.detail-chart-svg {
+  display: block;
+  min-width: 760px;
+  width: 100%;
+}
+
+.detail-chart-label {
+  fill: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.detail-chart-bar-bg {
+  fill: var(--chart-bar-bg);
+}
+
+.detail-chart-bar {
+  shape-rendering: geometricPrecision;
+}
+
+@media (max-width: 760px) {
+  .chart-svg {
+    min-width: 620px;
+  }
+
+  .usage-chart {
+    overflow-x: auto;
+  }
+}

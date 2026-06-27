@@ -12,6 +12,7 @@ import (
 
 	"tokenflow/internal/account"
 	"tokenflow/internal/admin"
+	"tokenflow/internal/chat"
 	"tokenflow/internal/config"
 	"tokenflow/internal/proxy"
 	"tokenflow/internal/secret"
@@ -37,6 +38,9 @@ func main() {
 	proxyHandler := proxy.New(st, box)
 	adminHandler := admin.New(st, box)
 	accountHandler := account.New(st)
+	chatService := chat.NewService(st, box, cfg.InfoFlowBaseURL)
+	adminHandler.SetChatService(chatService)
+	accountHandler.SetChatService(chatService)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -84,7 +88,11 @@ var homeTemplate = template.Must(template.New("home").Parse(`<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.Title}}</title>
   <link rel="icon" href="/admin/static/tokenflow-logo.svg">
-  <link rel="stylesheet" href="/admin/static/style.css">
+  <link rel="stylesheet" href="/admin/static/css/tokens.css">
+  <link rel="stylesheet" href="/admin/static/css/base.css">
+  <link rel="stylesheet" href="/admin/static/css/components.css">
+  <link rel="stylesheet" href="/admin/static/css/layout.css">
+  <script src="/admin/static/theme.js"></script>
 </head>
 <body class="auth-page">
   <main class="auth-card portal-card">

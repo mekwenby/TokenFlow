@@ -79,6 +79,9 @@ func TestNonStreamingProxyLogsCacheHitRate(t *testing.T) {
 	if len(logs) != 1 || logs[0].CacheReadTokens != 4 || logs[0].CacheHitRate < 0.39 || logs[0].CacheHitRate > 0.41 || logs[0].DistributionKeyName != "test" {
 		t.Fatalf("unexpected cache log: %#v", logs)
 	}
+	if logs[0].Model != "client-model" || logs[0].UpstreamModel != "upstream-model" {
+		t.Fatalf("proxy log did not preserve client/upstream models: %#v", logs[0])
+	}
 	keys, err := st.DistributionKeys(context.Background())
 	if err != nil {
 		t.Fatal(err)

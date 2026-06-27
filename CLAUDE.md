@@ -10,6 +10,12 @@ go build -o tokenflow ./cmd/server # production binary
 docker compose up --build -d       # containerized (multi-stage, CGO_ENABLED=0)
 ```
 
+Optional asset minification (requires Node.js):
+```sh
+npm install && npm run build        # minify JS/CSS into web/static/dist/
+go generate ./web                   # same as above, via go:generate
+```
+
 Startup reads `GATEWAY_ADDR` (default `:8019`) and `GATEWAY_DATA_DIR` (default `data`).
 
 ## Test
@@ -53,11 +59,20 @@ Routes:
 
 **Account** (`internal/account/account.go`): consumer-facing self-service portal. Registration (pending by default, admin must enable), login, dashboard with quota/usage summary, and API key CRUD. Uses scoped sessions at path `/account` (separate cookies from admin), embedded Go templates with `text/template`, and i18n (en/zh-CN). Dashboard shows compact-number formatting (1.2K, 3.4M, 5B) for quota/usage.
 
+**HTTP utilities** (`internal/httputil/`): shared helpers used by both admin and account — `WriteError`, `DecodePayload`, `IDParam`, `WriteResult`, `NormalizeLang`, `LanguageFromRequest`, `SetLanguageCookie`, `SafeNextPath`.
+
 **Auth** (`internal/auth/auth.go`): SHA-256 key hashing with constant-time comparison, session cookie sign/verify via crypto/hmac. `NewSessions` is for admin (`/admin` path), `NewScopedSessions` for account (`/account` path) — same logic, different cookie names and paths to avoid collisions. Distribution key generation (`sk-` prefix, 32 random bytes).
 
 **Secret** (`internal/secret/secret.go`): AES-256-GCM encrypt/decrypt for upstream API keys. Key material persisted in `data/app.secret`; auto-generated if missing.
 
-**Web** (`web/web.go`): embeds `web/static/*` via `embed.FS` for serving CSS, JS, icons, and the logo. Three JS bundles: `common.js` (shared utilities), `app.js` (admin SPA), `account.js` (account dashboard).
+**Web** (`web/web.go`): embeds `web/static/*` via `embed.FS` for serving CSS, JS, icons, and the logo. Frontend is organized as ES modules:
+
+- `core/` — api.js (CSRF-aware fetch client factory), dom.js (esc, loading/error HTML, form busy), state.js (Store class via EventTarget), format.js, toast.js, confirm.js
+- `components/` — data-table.js (generic table rendering), crud-manager.js (form open/close/submit/delete patterns), chart.js (parameterized SVG bar/line charts)
+- `admin/app.js` — main admin SPA entry point, dispatch table for `data-action` events
+- `account/app.js` — consumer account portal, reuses core modules
+- `css/` — tokens.css (design tokens + light/dark themes), base.css, components.css, charts.css, layout.css
+- `dist/` — optional minified bundles produced by `npm run build`
 
 ## Routing algorithm
 

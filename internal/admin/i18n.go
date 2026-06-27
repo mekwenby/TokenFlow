@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"html/template"
 	"net/http"
-	"strings"
-	"time"
+
+	"tokenflow/internal/httputil"
 )
 
 const langCookie = "gateway_lang"
@@ -271,44 +271,19 @@ var translations = map[string]map[string]string{
 }
 
 func languageFromRequest(r *http.Request) string {
-	if cookie, err := r.Cookie(langCookie); err == nil {
-		if lang, ok := normalizeLang(cookie.Value); ok {
-			return lang
-		}
-	}
-	header := strings.ToLower(r.Header.Get("Accept-Language"))
-	if strings.Contains(header, "zh") {
-		return "zh-CN"
-	}
-	return "en"
+	return httputil.LanguageFromRequest(r, langCookie)
 }
 
 func normalizeLang(value string) (string, bool) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "en", "en-us", "en-gb":
-		return "en", true
-	case "zh", "zh-cn", "zh_cn", "cn", "zh-hans":
-		return "zh-CN", true
-	default:
-		return "", false
-	}
+	return httputil.NormalizeLang(value)
 }
 
 func setLanguageCookie(w http.ResponseWriter, lang string) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     langCookie,
-		Value:    lang,
-		Path:     "/admin",
-		MaxAge:   int((365 * 24 * time.Hour).Seconds()),
-		SameSite: http.SameSiteLaxMode,
-	})
+	httputil.SetLanguageCookie(w, langCookie, "/admin", lang)
 }
 
 func safeAdminNext(next string) string {
-	if next == "/admin" || strings.HasPrefix(next, "/admin/") || strings.HasPrefix(next, "/admin?") {
-		return next
-	}
-	return "/admin"
+	return httputil.SafeNextPath(next, "/admin")
 }
 
 func tr(lang, key string) string {

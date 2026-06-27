@@ -572,6 +572,7 @@ func (h *Handler) finish(ctx context.Context, req requestContext, statusCode int
 	_ = h.store.RecordRequest(ctx, store.RequestLog{
 		Protocol:            req.Protocol,
 		Model:               req.Model,
+		UpstreamModel:       req.Route.UpstreamModel,
 		ProviderID:          &providerID,
 		DistributionKeyID:   &distributionKeyID,
 		DistributionKeyName: req.Key.Name,
@@ -588,34 +589,7 @@ func (h *Handler) finish(ctx context.Context, req requestContext, statusCode int
 }
 
 func (h *Handler) models(ctx context.Context) ([]string, error) {
-	providers, err := h.store.Providers(ctx)
-	if err != nil {
-		return nil, err
-	}
-	mappings, err := h.store.Mappings(ctx)
-	if err != nil {
-		return nil, err
-	}
-	seen := map[string]bool{}
-	var models []string
-	for _, m := range mappings {
-		if !seen[m.ClientModel] {
-			models = append(models, m.ClientModel)
-			seen[m.ClientModel] = true
-		}
-	}
-	for _, p := range providers {
-		if !p.Enabled {
-			continue
-		}
-		for _, model := range p.Models {
-			if model != "" && !seen[model] {
-				models = append(models, model)
-				seen[model] = true
-			}
-		}
-	}
-	return models, nil
+	return h.store.AvailableModels(ctx)
 }
 
 func (h *Handler) writeProtocolError(w http.ResponseWriter, protocol string, status int, errType, message string) {

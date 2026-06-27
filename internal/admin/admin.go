@@ -13,16 +13,19 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"tokenflow/internal/auth"
+	"tokenflow/internal/chat"
+	"tokenflow/internal/httputil"
 	"tokenflow/internal/secret"
 	"tokenflow/internal/store"
 	"tokenflow/web"
 )
 
 type Handler struct {
-	store    *store.Store
-	box      *secret.Box
-	sessions *auth.Sessions
-	tpl      *template.Template
+	store       *store.Store
+	box         *secret.Box
+	chatService *chat.Service
+	sessions    *auth.Sessions
+	tpl         *template.Template
 }
 
 type pageData struct {
@@ -92,6 +95,10 @@ func New(st *store.Store, box *secret.Box) *Handler {
 	}
 }
 
+func (h *Handler) SetChatService(service *chat.Service) {
+	h.chatService = service
+}
+
 func (h *Handler) Register(r chi.Router) {
 	r.Get("/admin/static/*", h.static)
 	r.Get("/admin/setup", h.setupForm)
@@ -103,6 +110,7 @@ func (h *Handler) Register(r chi.Router) {
 	r.Group(func(r chi.Router) {
 		r.Use(h.requireSession)
 		r.Get("/admin", h.dashboard)
+		r.Get("/admin/chat", h.chatPage)
 		r.Get("/admin/api/providers", h.providers)
 		r.Post("/admin/api/providers", h.providers)
 		r.Put("/admin/api/providers", h.providers)
@@ -123,6 +131,14 @@ func (h *Handler) Register(r chi.Router) {
 		r.Get("/admin/api/token-usage", h.tokenUsage)
 		r.Get("/admin/api/model-token-details", h.modelTokenDetails)
 		r.Get("/admin/api/logs", h.logs)
+		chat.RegisterRoutes(r, chat.RouteConfig{
+			BasePath:         "/admin/api/chat",
+			Service:          h.chatService,
+			Store:            h.store,
+			Owner:            h.chatOwner,
+			RequireCSRF:      h.requireCSRFForWrite,
+			SettingsWritable: true,
+		})
 	})
 }
 
@@ -131,6 +147,14 @@ func (h *Handler) dashboard(w http.ResponseWriter, r *http.Request) {
 	data := h.page(r, "title.dashboard")
 	data.Username = session.Username
 	_ = h.tpl.ExecuteTemplate(w, "dashboard", data)
+}
+
+func (h *Handler) chatPage(w http.ResponseWriter, r *http.Request) {
+	session, _ := h.sessions.Get(r)
+	data := h.page(r, "title.dashboard")
+	data.Title = "LLM Chat"
+	data.Username = session.Username
+	_ = h.tpl.ExecuteTemplate(w, "chat", data)
 }
 
 func (h *Handler) setupForm(w http.ResponseWriter, r *http.Request) {
@@ -445,6 +469,14 @@ func (h *Handler) logs(w http.ResponseWriter, r *http.Request) {
 	h.writeResult(w, r, logsPage{Items: logs, Total: total, Limit: limit, Offset: offset, Query: query}, err)
 }
 
+func (h *Handler) chatOwner(r *http.Request) (store.ChatOwner, bool) {
+	session, ok := h.sessions.Get(r)
+	if !ok {
+		return store.ChatOwner{}, false
+	}
+	return store.ChatOwner{Type: store.ChatOwnerAdmin, ID: session.UserID, Name: session.Username}, true
+}
+
 func (h *Handler) requireSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !h.hasAdmin(r) {
@@ -513,11 +545,10 @@ func (h *Handler) writeResult(w http.ResponseWriter, r *http.Request, body any, 
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, store.ErrNotFound) {
-			status = http.StatusNotFound
-			h.writeLocalizedError(w, r, status, "not_found")
+			httputil.WriteError(w, http.StatusNotFound, tr(languageFromRequest(r), "not_found"))
 			return
 		}
-		writeError(w, status, err.Error())
+		httputil.WriteError(w, status, err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -525,18 +556,15 @@ func (h *Handler) writeResult(w http.ResponseWriter, r *http.Request, body any, 
 }
 
 func (h *Handler) writeLocalizedError(w http.ResponseWriter, r *http.Request, status int, key string) {
-	writeError(w, status, tr(languageFromRequest(r), key))
+	httputil.WriteError(w, status, tr(languageFromRequest(r), key))
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": message})
+	httputil.WriteError(w, status, message)
 }
 
 func idParam(r *http.Request) int64 {
-	id, _ := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
-	return id
+	return httputil.IDParam(r)
 }
 
 func normalizeLogsParams(limit, offset int) (int, int) {
@@ -569,7 +597,12 @@ const templates = `
 {{define "login"}}
 <!doctype html>
 <html lang="{{.Lang}}">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><link rel="icon" href="/admin/static/tokenflow-logo.svg"><link rel="stylesheet" href="/admin/static/style.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><link rel="icon" href="/admin/static/tokenflow-logo.svg"><link rel="stylesheet" href="/admin/static/css/tokens.css">
+  <link rel="stylesheet" href="/admin/static/css/base.css">
+  <link rel="stylesheet" href="/admin/static/css/components.css">
+  <link rel="stylesheet" href="/admin/static/css/charts.css">
+  <link rel="stylesheet" href="/admin/static/css/layout.css">
+  <script src="/admin/static/theme.js"></script></head>
 <body class="auth-page">
   <main class="auth-card">
     <div class="auth-head">
@@ -590,7 +623,12 @@ const templates = `
 {{define "setup"}}
 <!doctype html>
 <html lang="{{.Lang}}">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><link rel="icon" href="/admin/static/tokenflow-logo.svg"><link rel="stylesheet" href="/admin/static/style.css"></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><link rel="icon" href="/admin/static/tokenflow-logo.svg"><link rel="stylesheet" href="/admin/static/css/tokens.css">
+  <link rel="stylesheet" href="/admin/static/css/base.css">
+  <link rel="stylesheet" href="/admin/static/css/components.css">
+  <link rel="stylesheet" href="/admin/static/css/charts.css">
+  <link rel="stylesheet" href="/admin/static/css/layout.css">
+  <script src="/admin/static/theme.js"></script></head>
 <body class="auth-page">
   <main class="auth-card">
     <div class="auth-head">
@@ -617,13 +655,19 @@ const templates = `
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.Title}}</title>
   <link rel="icon" href="/admin/static/tokenflow-logo.svg">
-  <link rel="stylesheet" href="/admin/static/style.css">
+  <link rel="stylesheet" href="/admin/static/css/tokens.css">
+  <link rel="stylesheet" href="/admin/static/css/base.css">
+  <link rel="stylesheet" href="/admin/static/css/components.css">
+  <link rel="stylesheet" href="/admin/static/css/charts.css">
+  <link rel="stylesheet" href="/admin/static/css/layout.css">
+  <script src="/admin/static/theme.js"></script>
 </head>
 <body class="admin-page">
   <header class="topbar">
     <div class="topbar-inner">
       <h1 class="brand"><img src="/admin/static/tokenflow-logo.svg" alt="" aria-hidden="true"><span>{{tr .Lang "app.title"}}</span></h1>
       <div class="top-actions">
+        <a class="button-link secondary icon-label" href="/admin/chat"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-list"></use></svg><span>LLM Chat</span></a>
         {{template "lang_switch" .}}
         <span class="user-chip" title="{{.Username}}">{{.Username}}</span>
         <form method="post" action="/admin/logout">
@@ -635,26 +679,36 @@ const templates = `
       </div>
     </div>
   </header>
+  <div class="app-shell">
+    <aside class="side-nav" aria-label="Admin sections">
+      <a class="nav-item active" href="#overview" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-overview"></use></svg><span>{{tr .Lang "overview"}}</span></a>
+      <a class="nav-item" href="#api-addresses-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-link"></use></svg><span>{{tr .Lang "api_addresses"}}</span></a>
+      <a class="nav-item" href="#users-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-users"></use></svg><span>{{tr .Lang "users"}}</span></a>
+      <a class="nav-item" href="#providers-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-server"></use></svg><span>{{tr .Lang "providers"}}</span></a>
+      <a class="nav-item" href="#mappings-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-route"></use></svg><span>{{tr .Lang "model_mappings"}}</span></a>
+      <a class="nav-item" href="#keys-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-key"></use></svg><span>{{tr .Lang "distribution_keys"}}</span></a>
+      <a class="nav-item" href="#logs-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-list"></use></svg><span>{{tr .Lang "recent_requests"}}</span></a>
+    </aside>
   <main class="layout">
-    <section class="panel stats-panel">
+    <section id="overview" class="panel stats-panel">
       <h2>{{tr .Lang "overview"}}</h2>
       <div id="stats" class="stats-grid"></div>
       <div class="usage-section">
         <div class="section-head usage-head">
           <h3>{{tr .Lang "token_usage"}}</h3>
           <div class="segmented" role="group" aria-label="{{tr .Lang "usage_range"}}">
-            <button type="button" data-usage-range="24h">{{tr .Lang "last_24_hours"}}</button>
-            <button type="button" data-usage-range="7d">{{tr .Lang "last_7_days"}}</button>
+            <button type="button" data-action="usage-range" data-id="24h">{{tr .Lang "last_24_hours"}}</button>
+            <button type="button" data-action="usage-range" data-id="7d">{{tr .Lang "last_7_days"}}</button>
           </div>
         </div>
         <div id="token-usage" class="usage-chart"></div>
       </div>
     </section>
-    <section class="panel">
+    <section id="api-addresses-section" class="panel">
       <h2>{{tr .Lang "api_addresses"}}</h2>
       <div id="api-addresses" class="api-grid"></div>
     </section>
-    <section class="panel">
+    <section id="users-section" class="panel">
       <div class="section-head">
         <h2>{{tr .Lang "users"}}</h2>
       </div>
@@ -662,14 +716,14 @@ const templates = `
         <input type="hidden" name="id">
         <label>{{tr .Lang "status"}}<select name="status"><option value="pending">{{tr .Lang "pending"}}</option><option value="enabled">{{tr .Lang "enabled"}}</option><option value="disabled">{{tr .Lang "disabled"}}</option></select></label>
         <label>{{tr .Lang "quota_total_tokens"}}<input name="quota_total_tokens" type="number" min="0" step="1" required></label>
-        <div class="row-actions"><button type="submit">{{tr .Lang "save"}}</button><button type="button" class="secondary" data-cancel>{{tr .Lang "cancel"}}</button></div>
+        <div class="row-actions"><button type="submit">{{tr .Lang "save"}}</button><button type="button" class="secondary" data-action="cancel">{{tr .Lang "cancel"}}</button></div>
       </form>
       <div id="users" class="table-wrap"></div>
     </section>
-    <section class="panel">
+    <section id="providers-section" class="panel">
       <div class="section-head">
         <h2>{{tr .Lang "providers"}}</h2>
-        <button type="button" class="icon-label" data-open="provider-form">
+        <button type="button" class="icon-label" data-action="open" data-id="provider-form">
           <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-add"></use></svg>
           <span>{{tr .Lang "add_provider"}}</span>
         </button>
@@ -684,14 +738,14 @@ const templates = `
         <label class="wide">{{tr .Lang "supported_models"}}<textarea name="models" rows="4" placeholder="{{tr .Lang "models_placeholder"}}"></textarea></label>
         <label class="check"><input name="enabled" type="checkbox" checked> {{tr .Lang "enabled"}}</label>
         <label class="check"><input name="is_default" type="checkbox"> {{tr .Lang "default"}}</label>
-        <div class="row-actions"><button type="submit">{{tr .Lang "save"}}</button><button type="button" class="secondary" data-cancel>{{tr .Lang "cancel"}}</button></div>
+        <div class="row-actions"><button type="submit">{{tr .Lang "save"}}</button><button type="button" class="secondary" data-action="cancel">{{tr .Lang "cancel"}}</button></div>
       </form>
       <div id="providers" class="table-wrap"></div>
     </section>
-    <section class="panel">
+    <section id="mappings-section" class="panel">
       <div class="section-head">
         <h2>{{tr .Lang "model_mappings"}}</h2>
-        <button type="button" class="icon-label" data-open="mapping-form">
+        <button type="button" class="icon-label" data-action="open" data-id="mapping-form">
           <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-add"></use></svg>
           <span>{{tr .Lang "add_mapping"}}</span>
         </button>
@@ -701,14 +755,14 @@ const templates = `
         <label>{{tr .Lang "client_model"}}<input name="client_model" required></label>
         <label>{{tr .Lang "provider"}}<select name="provider_id" required></select></label>
         <label>{{tr .Lang "upstream_model"}}<input name="upstream_model" required></label>
-        <div class="row-actions"><button type="submit">{{tr .Lang "save"}}</button><button type="button" class="secondary" data-cancel>{{tr .Lang "cancel"}}</button></div>
+        <div class="row-actions"><button type="submit">{{tr .Lang "save"}}</button><button type="button" class="secondary" data-action="cancel">{{tr .Lang "cancel"}}</button></div>
       </form>
       <div id="mappings" class="table-wrap"></div>
     </section>
-    <section class="panel">
+    <section id="keys-section" class="panel">
       <div class="section-head">
         <h2>{{tr .Lang "distribution_keys"}}</h2>
-        <button type="button" class="icon-label" data-open="key-form">
+        <button type="button" class="icon-label" data-action="open" data-id="key-form">
           <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-add"></use></svg>
           <span>{{tr .Lang "create_key"}}</span>
         </button>
@@ -717,12 +771,12 @@ const templates = `
         <input type="hidden" name="id">
         <label>{{tr .Lang "name"}}<input name="name" required></label>
         <label class="check key-enabled hidden"><input name="enabled" type="checkbox" checked> {{tr .Lang "enabled"}}</label>
-        <div class="row-actions"><button type="submit">{{tr .Lang "save"}}</button><button type="button" class="secondary" data-cancel>{{tr .Lang "cancel"}}</button></div>
+        <div class="row-actions"><button type="submit">{{tr .Lang "save"}}</button><button type="button" class="secondary" data-action="cancel">{{tr .Lang "cancel"}}</button></div>
       </form>
       <p id="new-key" class="secret hidden"></p>
       <div id="keys" class="table-wrap"></div>
     </section>
-    <section class="panel">
+    <section id="logs-section" class="panel">
       <div class="section-head logs-head">
         <h2>{{tr .Lang "recent_requests"}}</h2>
         <form id="logs-search-form" class="logs-search">
@@ -730,14 +784,25 @@ const templates = `
           <button type="submit" class="action-icon" title="{{tr .Lang "logs_search"}}" aria-label="{{tr .Lang "logs_search"}}">
             <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-search"></use></svg>
           </button>
-          <button type="button" class="secondary action-icon" data-clear-logs-search title="{{tr .Lang "clear"}}" aria-label="{{tr .Lang "clear"}}">
+          <button type="button" class="secondary action-icon" data-action="clear-logs-search" title="{{tr .Lang "clear"}}" aria-label="{{tr .Lang "clear"}}">
             <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-close"></use></svg>
           </button>
         </form>
       </div>
       <div id="logs" class="table-wrap"></div>
+      <div id="logs-pager"></div>
     </section>
   </main>
+  </div>
+  <nav class="mobile-nav" aria-label="Admin sections">
+    <a class="nav-item active" href="#overview" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-overview"></use></svg><span>{{tr .Lang "overview"}}</span></a>
+    <a class="nav-item" href="#api-addresses-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-link"></use></svg><span>{{tr .Lang "api_addresses"}}</span></a>
+    <a class="nav-item" href="#users-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-users"></use></svg><span>{{tr .Lang "users"}}</span></a>
+    <a class="nav-item" href="#providers-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-server"></use></svg><span>{{tr .Lang "providers"}}</span></a>
+    <a class="nav-item" href="#mappings-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-route"></use></svg><span>{{tr .Lang "model_mappings"}}</span></a>
+    <a class="nav-item" href="#keys-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-key"></use></svg><span>{{tr .Lang "distribution_keys"}}</span></a>
+    <a class="nav-item" href="#logs-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-list"></use></svg><span>{{tr .Lang "recent_requests"}}</span></a>
+  </nav>
   <div id="detail-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="detail-modal-title">
     <div class="modal-dialog">
       <div class="modal-head">
@@ -745,7 +810,7 @@ const templates = `
           <h2 id="detail-modal-title">{{tr .Lang "model_token_details"}}</h2>
           <p id="detail-modal-subtitle"></p>
         </div>
-        <button type="button" class="secondary icon-label" data-close-detail>
+        <button type="button" class="secondary icon-label" data-action="close-detail">
           <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-close"></use></svg>
           <span>{{tr .Lang "close"}}</span>
         </button>
@@ -757,8 +822,165 @@ const templates = `
     window.__ADMIN_LANG__ = {{.LangJSON}};
     window.__ADMIN_I18N__ = {{.I18NJSON}};
   </script>
-  <script src="/admin/static/common.js"></script>
-  <script src="/admin/static/app.js"></script>
+  <script type="module" src="/admin/static/admin/app.js"></script>
+</body>
+</html>
+{{end}}
+
+{{define "chat"}}
+<!doctype html>
+<html lang="{{.Lang}}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{.Title}}</title>
+  <link rel="icon" href="/admin/static/tokenflow-logo.svg">
+  <link rel="stylesheet" href="/admin/static/css/tokens.css">
+  <link rel="stylesheet" href="/admin/static/css/base.css">
+  <link rel="stylesheet" href="/admin/static/css/components.css">
+  <link rel="stylesheet" href="/admin/static/css/layout.css">
+  <script src="/admin/static/theme.js"></script>
+</head>
+<body class="admin-page chat-page">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <h1 class="brand"><img src="/admin/static/tokenflow-logo.svg" alt="" aria-hidden="true"><span>LLM Chat</span></h1>
+      <div class="top-actions">
+        <a class="button-link secondary icon-label" href="/admin"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-overview"></use></svg><span>{{tr .Lang "overview"}}</span></a>
+        {{template "lang_switch" .}}
+        <span class="user-chip" title="{{.Username}}">{{.Username}}</span>
+        <form method="post" action="/admin/logout">
+          <button type="submit" class="secondary icon-label">
+            <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-log-out"></use></svg>
+            <span>{{tr .Lang "logout"}}</span>
+          </button>
+        </form>
+      </div>
+    </div>
+  </header>
+  <main class="chat-app" data-chat-root data-chat-lang="{{.Lang}}" data-chat-api-prefix="/admin/api/chat" data-chat-csrf-cookie="gateway_csrf" data-chat-settings-writable="true">
+    <aside class="chat-app-sidebar" aria-label="Conversations">
+      <div class="chat-sidebar-head">
+        <div>
+          <strong>TokenFlow</strong>
+          <span>LLM Chat</span>
+        </div>
+        <button type="button" class="action-icon" data-chat-new title="New chat" aria-label="New chat"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-add"></use></svg></button>
+      </div>
+      <div class="chat-list" data-chat-conversations></div>
+      <div class="chat-sidebar-foot">
+        <button type="button" class="chat-settings-button" data-chat-settings-open title="Chat settings" aria-label="Chat settings"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-settings"></use></svg><span>Settings</span></button>
+      </div>
+    </aside>
+    <section class="chat-app-main" aria-label="LLM Chat">
+      <div class="chat-app-toolbar">
+        <button type="button" class="chat-settings-summary" data-chat-settings-open title="Chat settings" aria-label="Chat settings">
+          <span>Settings</span>
+          <strong data-chat-settings-summary>Model loading - Medium</strong>
+        </button>
+        <div class="chat-tool-toggles" aria-label="Tool controls">
+          <label class="check"><input type="checkbox" data-chat-search checked> Search</label>
+          <label class="check"><input type="checkbox" data-chat-read checked> Read web</label>
+          <label class="check"><input type="checkbox" data-chat-process checked> Process</label>
+          <button type="button" class="secondary icon-label chat-process-reopen hidden" data-chat-process-reopen title="Show process panel" aria-label="Show process panel"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-chevron-left"></use></svg><span>Process</span></button>
+        </div>
+        <div class="chat-manage-actions">
+          <button type="button" class="secondary action-icon" data-chat-auto-title title="Generate title" aria-label="Generate title"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-refresh"></use></svg></button>
+          <button type="button" class="secondary action-icon" data-chat-rename title="Rename" aria-label="Rename"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-edit"></use></svg></button>
+          <button type="button" class="secondary action-icon" data-chat-delete title="Delete" aria-label="Delete"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-trash"></use></svg></button>
+        </div>
+      </div>
+      <div class="chat-workspace">
+        <div class="chat-body" data-chat-messages></div>
+        <aside class="chat-process-shell" data-chat-process-shell aria-label="Process timeline">
+          <div class="chat-process-head">
+            <div class="chat-process-title">
+              <strong>Process</strong>
+              <span>Thinking and tools</span>
+            </div>
+            <div class="chat-process-actions">
+              <button type="button" class="secondary action-icon" data-chat-process-top title="Scroll to top" aria-label="Scroll to top"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-arrow-up"></use></svg></button>
+              <button type="button" class="secondary action-icon" data-chat-process-bottom title="Scroll to bottom" aria-label="Scroll to bottom"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-arrow-down"></use></svg></button>
+              <button type="button" class="secondary action-icon" data-chat-process-collapse aria-expanded="true" title="Collapse process" aria-label="Collapse process"><svg class="icon" aria-hidden="true"><use data-chat-process-collapse-icon href="/admin/static/icons.svg#icon-chevron-right"></use></svg></button>
+            </div>
+          </div>
+          <div class="chat-process" data-chat-process-panel></div>
+        </aside>
+      </div>
+      <form class="chat-composer" data-chat-form>
+        <textarea data-chat-input rows="1" placeholder="Ask a question..." required></textarea>
+        <div class="chat-actions">
+          <button type="button" class="secondary hidden" data-chat-stop>Stop</button>
+          <button type="submit">Send</button>
+        </div>
+      </form>
+      <div class="chat-settings-modal hidden" data-chat-settings-modal aria-hidden="true">
+        <div class="chat-settings-backdrop" data-chat-settings-close></div>
+        <form class="chat-settings-dialog" data-chat-settings-form role="dialog" aria-modal="true" aria-labelledby="admin-chat-settings-title">
+          <div class="chat-settings-head">
+            <div>
+              <h2 id="admin-chat-settings-title">Chat settings</h2>
+              <p>Saved to this conversation</p>
+            </div>
+            <button type="button" class="secondary action-icon" data-chat-settings-close title="Close" aria-label="Close settings"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-close"></use></svg></button>
+          </div>
+          <div class="chat-settings-body">
+            <div class="chat-avatar-settings" aria-label="Avatar settings">
+              <div class="chat-avatar-card">
+                <div class="chat-avatar-card-head">
+                  <span>User avatar</span>
+                  <input data-chat-user-avatar maxlength="16" placeholder="😀" aria-label="User avatar">
+                </div>
+                <div class="chat-avatar-picker" aria-label="User avatar presets">
+                  <button type="button" class="chat-avatar-preset" data-chat-avatar-target="user" data-chat-avatar-value="😀">😀</button>
+                  <button type="button" class="chat-avatar-preset" data-chat-avatar-target="user" data-chat-avatar-value="😎">😎</button>
+                  <button type="button" class="chat-avatar-preset" data-chat-avatar-target="user" data-chat-avatar-value="🧑‍💻">🧑‍💻</button>
+                  <button type="button" class="chat-avatar-preset" data-chat-avatar-target="user" data-chat-avatar-value="🧑‍🚀">🧑‍🚀</button>
+                  <button type="button" class="chat-avatar-preset" data-chat-avatar-target="user" data-chat-avatar-value="✨">✨</button>
+                </div>
+              </div>
+              <div class="chat-avatar-card">
+                <div class="chat-avatar-card-head">
+                  <span>Assistant avatar</span>
+                  <input data-chat-assistant-avatar maxlength="16" placeholder="🤖" aria-label="Assistant avatar">
+                </div>
+                <div class="chat-avatar-picker" aria-label="Assistant avatar presets">
+                  <button type="button" class="chat-avatar-preset" data-chat-avatar-target="assistant" data-chat-avatar-value="🤖">🤖</button>
+                  <button type="button" class="chat-avatar-preset" data-chat-avatar-target="assistant" data-chat-avatar-value="🧠">🧠</button>
+                  <button type="button" class="chat-avatar-preset" data-chat-avatar-target="assistant" data-chat-avatar-value="🛠️">🛠️</button>
+                  <button type="button" class="chat-avatar-preset" data-chat-avatar-target="assistant" data-chat-avatar-value="📚">📚</button>
+                  <button type="button" class="chat-avatar-preset" data-chat-avatar-target="assistant" data-chat-avatar-value="🧭">🧭</button>
+                </div>
+              </div>
+            </div>
+            <label class="chat-model-field">Model<select data-chat-model></select></label>
+            <fieldset class="chat-thinking chat-settings-thinking">
+              <legend>Thinking</legend>
+              <label><input type="radio" name="admin-chat-thinking" value="off">Off</label>
+              <label><input type="radio" name="admin-chat-thinking" value="low">Low</label>
+              <label><input type="radio" name="admin-chat-thinking" value="medium" checked>Medium</label>
+              <label><input type="radio" name="admin-chat-thinking" value="high">High</label>
+            </fieldset>
+            <label class="chat-settings-field chat-max-tools-field">Max tool calls<input data-chat-max-tool-calls type="number" min="0" max="20" step="1" value="6"></label>
+            <section class="chat-default-system-prompt" aria-label="Default system prompt">
+              <div class="chat-default-system-head">
+                <strong data-chat-default-system-title>Default system prompt</strong>
+                <span data-chat-default-system-hint>Always applied by TokenFlow. Your instructions below are appended.</span>
+              </div>
+              <pre data-chat-default-system-prompt></pre>
+            </section>
+            <label class="chat-settings-field">System prompt<textarea data-chat-system-prompt maxlength="8000" rows="8" placeholder="Optional instructions for this conversation"></textarea></label>
+            <label class="chat-settings-field">My nickname<input data-chat-nickname maxlength="64" placeholder="Optional display name"></label>
+          </div>
+          <div class="chat-settings-actions">
+            <button type="button" class="secondary" data-chat-settings-cancel>Cancel</button>
+            <button type="submit" data-chat-settings-save>Save</button>
+          </div>
+        </form>
+      </div>
+    </section>
+  </main>
+  <script type="module" src="/admin/static/chat/app.js"></script>
 </body>
 </html>
 {{end}}

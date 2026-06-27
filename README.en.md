@@ -2,7 +2,7 @@
 
 [中文](README.md) | English
 
-TokenFlow is a Go 1.21 LLM gateway that exposes OpenAI-compatible and Anthropic-compatible public APIs. It supports SQLite persistence, encrypted upstream provider keys, model routing, SSE streaming conversion, request usage logging, and an embedded admin UI.
+TokenFlow is a Go 1.21 LLM gateway that exposes OpenAI-compatible and Anthropic-compatible public APIs. It supports SQLite persistence, encrypted upstream provider keys, model routing, cross-protocol conversion, SSE proxying, request usage logging, an embedded admin UI, a consumer self-service portal, and built-in LLM Chat.
 
 ## Screenshots
 
@@ -17,7 +17,10 @@ TokenFlow is a Go 1.21 LLM gateway that exposes OpenAI-compatible and Anthropic-
 - Legacy Anthropic path `POST /anthropic/v1/messages`.
 - Model list endpoints for configured platform models.
 - Cross-protocol request, response, and streaming conversion between OpenAI and Anthropic formats.
-- Provider, model mapping, distribution key, request log, and usage-stat management through the admin UI.
+- Portal page with separate admin and consumer entry points.
+- Admin UI for providers, model mappings, distribution keys, consumer users, request logs, token usage reports, and model token details.
+- Consumer self-service for registration, login, quota review, personal API key management, and personal request logs.
+- Built-in LLM Chat for both admins and consumers, with conversations, model selection, thinking effort, custom system prompts, nicknames, and optional web search / URL reading tools.
 - SQLite storage with automatic migrations.
 - AES-256-GCM encryption for upstream provider API keys.
 
@@ -25,6 +28,7 @@ TokenFlow is a Go 1.21 LLM gateway that exposes OpenAI-compatible and Anthropic-
 
 - Go 1.21 or newer.
 - Docker and Docker Compose, if you want to run the containerized setup.
+- Node.js, only if you need to rebuild minified frontend assets.
 
 ## Run Locally
 
@@ -34,12 +38,25 @@ go run ./cmd/server
 
 By default, the server listens on `http://localhost:8019`.
 
-Open `http://localhost:8019/admin` and create the first admin user. Then configure:
+Common entry points:
+
+- `GET /`: portal page with localized admin and consumer links.
+- `GET /healthz`: liveness check, returns `{"ok":true}` when healthy.
+- `GET /admin`: admin dashboard. The first run redirects to admin setup.
+- `GET /admin/chat`: admin LLM Chat.
+- `GET /account/register`: consumer registration. New users start as `pending`.
+- `GET /account/login`: consumer login.
+- `GET /account`: consumer dashboard.
+- `GET /account/chat`: consumer LLM Chat.
+
+Recommended first-run setup:
 
 1. A provider with protocol `openai` or `anthropic`.
 2. One or more supported models for that provider. The default model is included automatically.
 3. Optional model mappings from client-facing model names to a provider and upstream model.
-4. A distribution key for API clients.
+4. An admin-owned distribution key for API clients.
+5. Approve consumer users by setting them to `enabled` and assigning token quota.
+6. Let consumers create their own API keys from the consumer dashboard.
 
 The service stores data in `data/gateway.db` and encrypts upstream API keys with `data/app.secret`.
 
@@ -48,6 +65,21 @@ The service stores data in `data/gateway.db` and encrypts upstream API keys with
 ```sh
 go build -o tokenflow ./cmd/server
 ```
+
+Optional frontend asset minification:
+
+```sh
+npm install
+npm run build
+```
+
+You can also trigger the same build through Go generate:
+
+```sh
+go generate ./web
+```
+
+The generated assets are written to `web/static/dist/`, including minified JS/CSS files and a manifest.
 
 ## Test
 
@@ -71,6 +103,12 @@ docker compose up --build -d
 The container exposes port `8019` and persists data in `./data`.
 
 ## Public APIs
+
+Health check:
+
+```sh
+curl http://localhost:8019/healthz
+```
 
 OpenAI-compatible chat completions:
 
@@ -98,6 +136,18 @@ Model list endpoints:
 - `GET /v1/models`
 - `GET /anthropic/v1/models`
 
+## Architecture
+
+- `cmd/server/main.go`: loads configuration, the secret box, and the SQLite store, then registers the portal, health check, admin, account, chat, and proxy routes.
+- `internal/store`: single `*sql.DB` for admin users, consumer users, providers, model mappings, distribution keys, request logs, usage reports, chat conversations, and chat messages. It auto-migrates schema on startup.
+- `internal/proxy`: gateway core for distribution-key authentication, consumer quota checks, route resolution, upstream key decryption, cross-protocol conversion, SSE conversion, and request logging.
+- `internal/convert`: pure OpenAI / Anthropic request, response, and SSE chunk conversion functions.
+- `internal/admin`: admin UI for providers, model mappings, keys, users, logs, reports, and chat.
+- `internal/account`: consumer self-service portal for registration, login, quota overview, API key management, request logs, and chat.
+- `internal/chat`: built-in chat service that reuses model routing and usage logging, with optional web search and URL reading tools.
+- `internal/httputil`: shared HTTP, language, error response, and safe redirect helpers used by admin and account handlers.
+- `web/static`: embedded frontend assets organized into `core/`, `components/`, `admin/`, `account/`, `chat/`, `css/`, and optional `dist/`.
+
 ## Routing
 
 TokenFlow resolves each request in this order:
@@ -112,13 +162,16 @@ Environment variables:
 
 - `GATEWAY_ADDR`: listen address, default `:8019`.
 - `GATEWAY_DATA_DIR`: data directory, default `data`.
+- `INFOFLOW_BASE_URL`: InfoFlow service base URL used by the built-in chat web search and URL reading tools, default `https://infoflow.030399.xyz`.
 
 ## Security And Logging
 
 - Distribution keys are only shown once when created. Only the hash is stored.
 - Upstream provider API keys are encrypted before they are stored.
 - Prompt and response bodies are not persisted in request logs.
-- Request logs store operational metadata such as latency, token counts, status, provider, and model.
+- Request logs store operational metadata such as latency, token counts, status, provider, model, key, and user.
+- Consumer registrations start as `pending`; an admin must enable the user and assign quota before the user can use API keys or chat.
+- Admin and consumer sessions use different paths and cookie scopes, so the two login states do not overwrite each other.
 
 ## Scope
 

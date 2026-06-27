@@ -2,7 +2,7 @@
 
 中文 | [English](README.en.md)
 
-TokenFlow 是一个基于 Go 1.21 的 LLM 网关，对外提供兼容 OpenAI 和 Anthropic 的 API。它支持 SQLite 持久化、上游供应商密钥加密、模型路由、SSE 流式转换、请求用量日志，以及内嵌管理后台。
+TokenFlow 是一个基于 Go 1.21 的 LLM 网关，对外提供兼容 OpenAI 和 Anthropic 的 API。它支持 SQLite 持久化、上游供应商密钥加密、模型路由、跨协议转换、SSE 流式代理、请求用量日志、管理员后台、普通用户自助门户，以及内置 LLM Chat。
 
 ## 界面预览
 
@@ -17,14 +17,18 @@ TokenFlow 是一个基于 Go 1.21 的 LLM 网关，对外提供兼容 OpenAI 和
 - 兼容旧版 Anthropic 路径 `POST /anthropic/v1/messages`。
 - 为客户端返回已配置平台模型的模型列表接口。
 - 支持 OpenAI 与 Anthropic 格式之间的跨协议请求、响应和流式转换。
-- 可通过管理后台维护供应商、模型映射、分发密钥、请求日志和用量统计。
+- 首页门户区分管理员入口与普通用户入口。
+- 管理员后台可维护供应商、模型映射、分发密钥、普通用户、请求日志、Token 用量统计和模型 Token 明细。
+- 普通用户可自助注册、登录、查看额度、管理自己的 API Key，并查看自己的请求记录。
+- 管理员和普通用户都可以使用内置 LLM Chat；聊天支持会话、模型选择、思考强度、自定义系统提示词、昵称，以及可选的网页搜索和 URL 读取工具。
 - 使用 SQLite 存储，并在启动时自动迁移数据库结构。
 - 使用 AES-256-GCM 加密保存上游供应商 API 密钥。
 
 ## 环境要求
 
 - Go 1.21 或更高版本。
-- 如果需要容器化运行，需要 Docker 和 Docker Compose。
+- Docker 和 Docker Compose（仅容器化运行时需要）。
+- Node.js（仅在需要重新构建前端压缩资源时需要）。
 
 ## 本地运行
 
@@ -34,12 +38,25 @@ go run ./cmd/server
 
 默认情况下，服务监听 `http://localhost:8019`。
 
-打开 `http://localhost:8019/admin` 并创建第一个管理员用户。然后配置：
+常用入口：
+
+- `GET /`：首页门户，按语言展示管理员和普通用户入口。
+- `GET /healthz`：健康检查，正常返回 `{"ok":true}`。
+- `GET /admin`：管理员后台。首次运行会引导创建第一个管理员用户。
+- `GET /admin/chat`：管理员 LLM Chat。
+- `GET /account/register`：普通用户注册。新用户默认为 `pending`。
+- `GET /account/login`：普通用户登录。
+- `GET /account`：普通用户控制台。
+- `GET /account/chat`：普通用户 LLM Chat。
+
+首次启动后的建议配置流程：
 
 1. 一个协议为 `openai` 或 `anthropic` 的供应商。
 2. 该供应商支持的一个或多个模型。默认模型会自动包含在内。
 3. 可选的模型映射，将客户端模型名映射到指定供应商和上游模型。
-4. 给 API 客户端使用的分发密钥。
+4. 给 API 客户端使用的管理员分发密钥。
+5. 审批普通用户，将状态改为 `enabled`，并分配 Token 额度。
+6. 让普通用户在自己的控制台创建 API Key。
 
 服务会把数据保存到 `data/gateway.db`，并使用 `data/app.secret` 加密上游 API 密钥。
 
@@ -48,6 +65,21 @@ go run ./cmd/server
 ```sh
 go build -o tokenflow ./cmd/server
 ```
+
+可选的前端资源压缩构建：
+
+```sh
+npm install
+npm run build
+```
+
+也可以通过 Go 生成命令触发同样的构建：
+
+```sh
+go generate ./web
+```
+
+构建产物会写入 `web/static/dist/`，用于生成压缩后的 JS/CSS 文件和 manifest。
 
 ## 测试
 
@@ -71,6 +103,12 @@ docker compose up --build -d
 容器会暴露 `8019` 端口，并将数据持久化到 `./data`。
 
 ## 对外 API
+
+健康检查：
+
+```sh
+curl http://localhost:8019/healthz
+```
 
 兼容 OpenAI 的 Chat Completions：
 
@@ -98,6 +136,18 @@ curl http://localhost:8019/v1/messages \
 - `GET /v1/models`
 - `GET /anthropic/v1/models`
 
+## 架构
+
+- `cmd/server/main.go`：加载配置、密钥盒和 SQLite store，注册首页、健康检查、管理员、普通用户、聊天和代理路由。
+- `internal/store`：单个 `*sql.DB`，负责管理员、普通用户、供应商、模型映射、分发密钥、请求日志、用量统计、聊天会话和消息；启动时自动迁移 schema。
+- `internal/proxy`：网关核心，负责分发密钥鉴权、消费者额度检查、路由解析、上游密钥解密、跨协议转换、SSE 转换和请求记录。
+- `internal/convert`：纯函数实现 OpenAI 与 Anthropic 请求、响应和 SSE chunk 的相互转换。
+- `internal/admin`：管理员后台，包含供应商、模型映射、Key、用户、日志、统计和聊天页面。
+- `internal/account`：普通用户自助门户，包含注册、登录、额度概览、API Key 管理、请求日志和聊天页面。
+- `internal/chat`：内置聊天服务，复用模型路由与用量记录，支持网页搜索和 URL 读取工具。
+- `internal/httputil`：管理员和普通用户模块共用的 HTTP、语言、错误响应和安全跳转工具。
+- `web/static`：嵌入式前端资源，按 `core/`、`components/`、`admin/`、`account/`、`chat/`、`css/` 和可选 `dist/` 组织。
+
 ## 路由规则
 
 TokenFlow 会按以下顺序解析每个请求：
@@ -112,13 +162,16 @@ TokenFlow 会按以下顺序解析每个请求：
 
 - `GATEWAY_ADDR`：监听地址，默认值为 `:8019`。
 - `GATEWAY_DATA_DIR`：数据目录，默认值为 `data`。
+- `INFOFLOW_BASE_URL`：内置聊天网页搜索和 URL 读取工具使用的 InfoFlow 服务地址，默认值为 `https://infoflow.030399.xyz`。
 
 ## 安全与日志
 
 - 分发密钥只会在创建时显示一次，数据库中只保存哈希值。
 - 上游供应商 API 密钥会加密后再保存。
 - 请求日志不会持久化保存 prompt 或 response 正文。
-- 请求日志只记录延迟、token 数量、状态码、供应商、模型等运行元数据。
+- 请求日志只记录延迟、token 数量、状态码、供应商、模型、Key、用户等运行元数据。
+- 普通用户注册后默认为 `pending`，必须由管理员启用并分配额度后才能使用 API Key 或聊天。
+- 管理员和普通用户使用不同路径和 cookie 作用域的会话，避免登录态互相覆盖。
 
 ## 范围
 

@@ -123,6 +123,7 @@ func TestStoreRouteKeysAndStats(t *testing.T) {
 	if err := st.InsertRequestLog(ctx, RequestLog{
 		Protocol:            "openai",
 		Model:               "client-model",
+		UpstreamModel:       "upstream-model",
 		ProviderID:          &providerID,
 		DistributionKeyID:   &keyID,
 		DistributionKeyName: "test",
@@ -156,6 +157,9 @@ func TestStoreRouteKeysAndStats(t *testing.T) {
 	}
 	if len(logs) != 1 || logs[0].ProviderName != "openai" || !logs[0].Stream {
 		t.Fatalf("unexpected logs: %#v", logs)
+	}
+	if logs[0].Model != "client-model" || logs[0].UpstreamModel != "upstream-model" {
+		t.Fatalf("client and upstream models were not returned correctly: %#v", logs[0])
 	}
 	if logs[0].DistributionKeyID == nil || *logs[0].DistributionKeyID != key.ID || logs[0].DistributionKeyName != "test" {
 		t.Fatalf("distribution key was not returned in log: %#v", logs[0])
@@ -270,6 +274,68 @@ func TestRequestLogDistributionKeyColumnMigration(t *testing.T) {
 	}
 	if len(logs) != 1 || logs[0].DistributionKeyName != "client" {
 		t.Fatalf("distribution key columns were not migrated: %#v", logs)
+	}
+	if logs[0].UpstreamModel != "model" {
+		t.Fatalf("legacy log upstream model should fall back to client model: %#v", logs[0])
+	}
+}
+
+func TestAdminUsageColumnMigration(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "gateway.db")
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE admin_users (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		username TEXT NOT NULL UNIQUE,
+		password_hash TEXT NOT NULL,
+		created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO admin_users(username, password_hash) VALUES('legacy-admin', 'hash')`); err != nil {
+		_ = db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	admin, err := st.AdminByUsername(ctx, "legacy-admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admin.RequestCount != 0 || admin.InputTokens != 0 || admin.CacheReadTokens != 0 || admin.OutputTokens != 0 || admin.LastUsedAt != nil {
+		t.Fatalf("legacy admin usage defaults were not migrated: %#v", admin)
+	}
+	adminID := admin.ID
+	if err := st.RecordRequest(ctx, RequestLog{
+		Protocol:        "chat",
+		Model:           "model",
+		AdminUserID:     &adminID,
+		AdminUsername:   admin.Username,
+		StatusCode:      200,
+		LatencyMS:       1,
+		InputTokens:     9,
+		CacheReadTokens: 4,
+		OutputTokens:    3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	admin, err = st.AdminUser(ctx, admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admin.RequestCount != 1 || admin.InputTokens != 9 || admin.CacheReadTokens != 4 || admin.OutputTokens != 3 || admin.LastUsedAt == nil {
+		t.Fatalf("migrated admin usage was not updated: %#v", admin)
 	}
 }
 
@@ -457,7 +523,7 @@ func TestStoreLogsSearch(t *testing.T) {
 	clientAID, clientBID := clientA.ID, clientB.ID
 	for _, log := range []RequestLog{
 		{Protocol: "openai", Model: "gpt-4.1", ProviderID: &openaiID, DistributionKeyID: &clientAID, StatusCode: 200, LatencyMS: 1},
-		{Protocol: "openai", Model: "gpt-4.1-mini", ProviderID: &openaiID, DistributionKeyID: &clientBID, StatusCode: 200, LatencyMS: 1},
+		{Protocol: "openai", Model: "gpt-4.1-mini", UpstreamModel: "gpt-4.1-upstream", ProviderID: &openaiID, DistributionKeyID: &clientBID, StatusCode: 200, LatencyMS: 1},
 		{Protocol: "anthropic", Model: "claude-3-5-sonnet", ProviderID: &anthropicID, DistributionKeyID: &clientAID, StatusCode: 200, LatencyMS: 1},
 		{Protocol: "openai", Model: "literal%model", ProviderID: &openaiID, DistributionKeyID: &clientAID, StatusCode: 200, LatencyMS: 1},
 	} {
@@ -472,6 +538,17 @@ func TestStoreLogsSearch(t *testing.T) {
 	}
 	if len(logs) != 1 || logs[0].Model != "gpt-4.1-mini" {
 		t.Fatalf("key search returned unexpected logs: %#v", logs)
+	}
+	if logs[0].UpstreamModel != "gpt-4.1-upstream" {
+		t.Fatalf("upstream model was not returned from logs search: %#v", logs[0])
+	}
+
+	logs, err = st.LogsSearch(ctx, 20, 0, "gpt-4.1-upstream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 || logs[0].Model != "gpt-4.1-mini" {
+		t.Fatalf("upstream model search returned unexpected logs: %#v", logs)
 	}
 
 	logs, err = st.LogsSearch(ctx, 20, 0, "OpenAI Primary & gpt-4.1")
@@ -503,6 +580,92 @@ func TestStoreLogsSearch(t *testing.T) {
 	}
 	if len(logs) != 1 || logs[0].Model != "literal%model" {
 		t.Fatalf("LIKE escaping returned unexpected logs: %#v", logs)
+	}
+}
+
+func TestStoreConsumerLogsSearch(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	user, err := st.CreateConsumerUser(ctx, "user@example.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err = st.UpdateConsumerUser(ctx, user.ID, ConsumerStatusEnabled, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := st.CreateConsumerUser(ctx, "other@example.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err = st.UpdateConsumerUser(ctx, other.ID, ConsumerStatusEnabled, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := st.CreateConsumerDistributionKey(ctx, user.ID, "Alpha % Key", "sk-alpha", "hash-alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKey, err := st.CreateConsumerDistributionKey(ctx, other.ID, "Other Key", "sk-other", "hash-other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyID, otherKeyID := key.ID, otherKey.ID
+	userID, otherID := user.ID, other.ID
+	for _, log := range []RequestLog{
+		{Protocol: "openai", Model: "model-a", UpstreamModel: "hidden-upstream", DistributionKeyID: &keyID, DistributionKeyName: key.Name, ConsumerUserID: &userID, ConsumerEmail: user.Email, StatusCode: 200, LatencyMS: 10, InputTokens: 10, CacheReadTokens: 4, CacheCreationTokens: 2, OutputTokens: 3, Stream: true},
+		{Protocol: "openai", Model: "model-b", DistributionKeyID: &keyID, DistributionKeyName: "Beta Key", ConsumerUserID: &userID, ConsumerEmail: user.Email, StatusCode: 500, LatencyMS: 20, InputTokens: 99, OutputTokens: 99},
+		{Protocol: "openai", Model: "model-a", DistributionKeyID: &otherKeyID, DistributionKeyName: otherKey.Name, ConsumerUserID: &otherID, ConsumerEmail: other.Email, StatusCode: 200, LatencyMS: 30},
+	} {
+		if err := st.RecordRequest(ctx, log); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	logs, err := st.ConsumerLogsSearch(ctx, user.ID, 20, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 2 || logs[0].Model != "model-b" || logs[1].Model != "model-a" {
+		t.Fatalf("consumer logs were not scoped and sorted: %#v", logs)
+	}
+	if logs[1].UpstreamModel != "" || logs[1].ConsumerEmail != "" {
+		t.Fatalf("consumer log query should not populate hidden fields: %#v", logs[1])
+	}
+	count, err := st.ConsumerLogCountSearch(ctx, user.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("unexpected consumer log count: %d", count)
+	}
+
+	logs, err = st.ConsumerLogsSearch(ctx, user.ID, 20, 0, "Alpha % & model-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 || logs[0].DistributionKeyName != key.Name {
+		t.Fatalf("consumer AND search with LIKE escaping returned unexpected logs: %#v", logs)
+	}
+	logs, err = st.ConsumerLogsSearch(ctx, user.ID, 20, 0, "Beta | Other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 || logs[0].DistributionKeyName != "Beta Key" {
+		t.Fatalf("consumer OR search should stay scoped to the user: %#v", logs)
+	}
+
+	user, err = st.ConsumerUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.RequestCount != 1 || user.QuotaUsedTokens != 13 {
+		t.Fatalf("failed request should be logged but not consume usage: %#v", user)
 	}
 }
 
@@ -615,6 +778,313 @@ func TestStoreModelTokenDetails(t *testing.T) {
 	}
 	if _, err := st.ModelTokenDetails(ctx, "provider", 9999); err != ErrNotFound {
 		t.Fatalf("unexpected missing provider error: %v", err)
+	}
+}
+
+func TestStoreChatConversationsAreScopedAndCascade(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	user, err := st.CreateConsumerUser(ctx, "chat@example.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err = st.UpdateConsumerUser(ctx, user.ID, ConsumerStatusEnabled, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := st.CreateConsumerUser(ctx, "other-chat@example.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err = st.UpdateConsumerUser(ctx, other.ID, ConsumerStatusEnabled, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateAdmin(ctx, "admin", "hash"); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := st.AdminByUsername(ctx, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	consumerOwner := ChatOwner{Type: ChatOwnerConsumer, ID: user.ID, Name: user.Email}
+	otherOwner := ChatOwner{Type: ChatOwnerConsumer, ID: other.ID, Name: other.Email}
+	adminOwner := ChatOwner{Type: ChatOwnerAdmin, ID: admin.ID, Name: admin.Username}
+	consumerConv, err := st.CreateChatConversation(ctx, consumerOwner, "", "gpt-4.1", "high", "  Be concise.  ", "  Mek  ", "  🧑‍💻  ", "  🧠  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminConv, err := st.CreateChatConversation(ctx, adminOwner, "Admin chat", "claude", "low", "", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateChatConversation(ctx, otherOwner, "Other chat", "gpt-4.1-mini", "medium", "", "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if consumerConv.Title != "New chat" || consumerConv.ThinkingEffort != "high" || consumerConv.SystemPrompt != "Be concise." || consumerConv.Nickname != "Mek" || consumerConv.UserAvatar != "🧑‍💻" || consumerConv.AssistantAvatar != "🧠" || consumerConv.Status != ChatConversationStatusIdle || consumerConv.ActiveOperation != "" || consumerConv.ConsumerUserID == nil || *consumerConv.ConsumerUserID != user.ID || consumerConv.AdminUserID != nil {
+		t.Fatalf("unexpected consumer conversation: %#v", consumerConv)
+	}
+	if adminConv.UserAvatar != "😀" || adminConv.AssistantAvatar != "🤖" || adminConv.AdminUserID == nil || *adminConv.AdminUserID != admin.ID || adminConv.ConsumerUserID != nil {
+		t.Fatalf("unexpected admin conversation: %#v", adminConv)
+	}
+	if !consumerConv.TitleAutoGenerated || adminConv.TitleAutoGenerated {
+		t.Fatalf("unexpected title auto flags: consumer=%v admin=%v", consumerConv.TitleAutoGenerated, adminConv.TitleAutoGenerated)
+	}
+	if _, err := st.UpdateChatConversationAutoTitle(ctx, adminOwner, adminConv.ID, "Generated admin title"); err != ErrNotFound {
+		t.Fatalf("manual admin title should not be auto-updated, got %v", err)
+	}
+	adminConv, err = st.UpdateChatConversationGeneratedTitle(ctx, adminOwner, adminConv.ID, "Forced admin title", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adminConv.Title != "Forced admin title" || !adminConv.TitleAutoGenerated {
+		t.Fatalf("forced title update failed: %#v", adminConv)
+	}
+	consumerConv, err = st.UpdateChatConversationAutoTitle(ctx, consumerOwner, consumerConv.ID, "Generated title")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if consumerConv.Title != "Generated title" || !consumerConv.TitleAutoGenerated {
+		t.Fatalf("auto title update failed: %#v", consumerConv)
+	}
+
+	renamed := "Renamed"
+	model := "gpt-4.1-mini"
+	effort := "invalid"
+	longPrompt := strings.Repeat("x", 8100)
+	longNickname := strings.Repeat("n", 70)
+	emptyAvatar := "   "
+	longAvatar := strings.Repeat("🌟", 20)
+	consumerConv, err = st.UpdateChatConversation(ctx, consumerOwner, consumerConv.ID, &renamed, &model, &effort, &longPrompt, &longNickname, &emptyAvatar, &longAvatar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if consumerConv.Title != renamed || consumerConv.Model != model || consumerConv.ThinkingEffort != "medium" || len([]rune(consumerConv.SystemPrompt)) != 8000 || len([]rune(consumerConv.Nickname)) != 64 || consumerConv.UserAvatar != "😀" || len([]rune(consumerConv.AssistantAvatar)) != 16 {
+		t.Fatalf("conversation update did not normalize fields: %#v", consumerConv)
+	}
+	if consumerConv.TitleAutoGenerated {
+		t.Fatalf("manual title update should disable auto title: %#v", consumerConv)
+	}
+
+	if _, err := st.CreateChatMessage(ctx, consumerOwner, consumerConv.ID, ChatRoleUser, "hello", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateChatMessage(ctx, consumerOwner, consumerConv.ID, ChatRoleAssistant, "hi", `{"events":[{"type":"thinking"}]}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ChatConversation(ctx, otherOwner, consumerConv.ID); err != ErrNotFound {
+		t.Fatalf("other consumer should not read conversation, got %v", err)
+	}
+	if _, err := st.ChatMessages(ctx, adminOwner, consumerConv.ID); err != ErrNotFound {
+		t.Fatalf("admin owner should not read consumer conversation, got %v", err)
+	}
+	consumerConvs, err := st.ListChatConversations(ctx, consumerOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(consumerConvs) != 1 || consumerConvs[0].ID != consumerConv.ID || consumerConvs[0].LastMessageAt == nil {
+		t.Fatalf("consumer conversations were not scoped or timestamped: %#v", consumerConvs)
+	}
+	adminConvs, err := st.ListChatConversations(ctx, adminOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(adminConvs) != 1 || adminConvs[0].ID != adminConv.ID {
+		t.Fatalf("admin conversations were not scoped: %#v", adminConvs)
+	}
+
+	if err := st.DeleteChatConversation(ctx, consumerOwner, consumerConv.ID); err != nil {
+		t.Fatal(err)
+	}
+	var messageCount int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chat_messages WHERE conversation_id = ?`, consumerConv.ID).Scan(&messageCount); err != nil {
+		t.Fatal(err)
+	}
+	if messageCount != 0 {
+		t.Fatalf("chat messages were not cascade deleted: %d", messageCount)
+	}
+}
+
+func TestStoreMigratesChatConversationSettingsColumns(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "gateway.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE chat_conversations (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		owner_type TEXT NOT NULL,
+		consumer_user_id INTEGER,
+		admin_user_id INTEGER,
+		title TEXT NOT NULL DEFAULT '',
+		model TEXT NOT NULL DEFAULT '',
+		thinking_effort TEXT NOT NULL DEFAULT 'medium',
+		created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		last_message_at TEXT
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO chat_conversations(owner_type, admin_user_id, title, model, thinking_effort) VALUES('admin', 1, 'old', 'model-a', 'low')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	conv, err := st.ChatConversation(ctx, ChatOwner{Type: ChatOwnerAdmin, ID: 1, Name: "admin"}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conv.SystemPrompt != "" || conv.Nickname != "" || conv.UserAvatar != "😀" || conv.AssistantAvatar != "🤖" || conv.TitleAutoGenerated || conv.Status != ChatConversationStatusIdle || conv.StatusMessage != "" || conv.ActiveOperation != "" {
+		t.Fatalf("migrated conversation settings should default empty: %#v", conv)
+	}
+	maxToolCalls, err := st.ChatMaxToolCalls(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if maxToolCalls != DefaultChatMaxToolCalls {
+		t.Fatalf("unexpected default max tool calls: %d", maxToolCalls)
+	}
+	maxToolCalls, err = st.UpdateChatMaxToolCalls(ctx, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if maxToolCalls != 20 {
+		t.Fatalf("max tool calls was not updated: %d", maxToolCalls)
+	}
+	if _, err := st.UpdateChatMaxToolCalls(ctx, 21); err != ErrInvalidChatMaxToolCalls {
+		t.Fatalf("invalid max tool calls should be rejected, got %v", err)
+	}
+}
+
+func TestStoreChatConversationOperationLocks(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if err := st.CreateAdmin(ctx, "admin", "hash"); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := st.AdminByUsername(ctx, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := ChatOwner{Type: ChatOwnerAdmin, ID: admin.ID, Name: admin.Username}
+	conv, err := st.CreateChatConversation(ctx, owner, "", "model-a", "medium", "", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := st.CreateChatConversation(ctx, owner, "other", "model-a", "medium", "", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	locked, err := st.StartChatConversationOperation(ctx, owner, conv.ID, ChatConversationOperationResponding, "working", 30*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if locked.ActiveOperation != ChatConversationOperationResponding || locked.Status != ChatConversationStatusResponding || locked.StatusMessage != "working" || locked.ActiveStartedAt == nil || locked.StatusUpdatedAt == nil {
+		t.Fatalf("conversation was not locked as responding: %#v", locked)
+	}
+	if _, err := st.StartChatConversationOperation(ctx, owner, conv.ID, ChatConversationOperationTitleGenerating, "", 5*time.Minute); err != ErrChatConversationBusy {
+		t.Fatalf("same conversation should be busy, got %v", err)
+	}
+	if _, err := st.StartChatConversationOperation(ctx, owner, other.ID, ChatConversationOperationTitleGenerating, "", 5*time.Minute); err != nil {
+		t.Fatalf("different conversation should lock independently: %v", err)
+	}
+	released, err := st.FinishChatConversationOperation(ctx, owner, conv.ID, ChatConversationOperationResponding, ChatConversationStatusIdle, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if released.ActiveOperation != "" || released.Status != ChatConversationStatusIdle || released.StatusMessage != "" || released.ActiveStartedAt != nil {
+		t.Fatalf("conversation lock was not released: %#v", released)
+	}
+
+	if _, err := st.db.ExecContext(ctx, `UPDATE chat_conversations SET active_operation = ?, active_operation_started_at = datetime('now', '-10 minutes'), status = ? WHERE id = ?`, ChatConversationOperationResponding, ChatConversationStatusResponding, conv.ID); err != nil {
+		t.Fatal(err)
+	}
+	taken, err := st.StartChatConversationOperation(ctx, owner, conv.ID, ChatConversationOperationTitleGenerating, "", 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if taken.ActiveOperation != ChatConversationOperationTitleGenerating || taken.Status != ChatConversationStatusTitleGenerating {
+		t.Fatalf("expired operation was not taken over: %#v", taken)
+	}
+}
+
+func TestAdminUsageAndRequestLogMetadata(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if err := st.CreateAdmin(ctx, "admin", "hash"); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := st.AdminByUsername(ctx, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := st.CreateProvider(ctx, ProviderInput{
+		Name:         "chat-provider",
+		Protocol:     "openai",
+		BaseAPI:      "https://api.example.test/v1",
+		APIKeyCipher: "cipher",
+		DefaultModel: "gpt-4.1",
+		Enabled:      true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminID := admin.ID
+	providerID := provider.ID
+	for _, log := range []RequestLog{
+		{Protocol: "chat", Model: "gpt-4.1", ProviderID: &providerID, AdminUserID: &adminID, AdminUsername: admin.Username, StatusCode: 200, LatencyMS: 12, InputTokens: 20, CacheReadTokens: 5, CacheCreationTokens: 2, OutputTokens: 7},
+		{Protocol: "chat", Model: "gpt-4.1", ProviderID: &providerID, AdminUserID: &adminID, AdminUsername: admin.Username, StatusCode: 502, LatencyMS: 3, InputTokens: 100, OutputTokens: 100},
+	} {
+		if err := st.RecordRequest(ctx, log); err != nil {
+			t.Fatal(err)
+		}
+	}
+	admin, err = st.AdminUser(ctx, admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admin.RequestCount != 1 || admin.InputTokens != 20 || admin.CacheReadTokens != 5 || admin.OutputTokens != 7 || admin.LastUsedAt == nil {
+		t.Fatalf("admin usage should count successful requests only: %#v", admin)
+	}
+	logs, err := st.LogsSearch(ctx, 10, 0, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 2 || logs[0].AdminUserID == nil || *logs[0].AdminUserID != admin.ID || logs[0].AdminUsername != admin.Username {
+		t.Fatalf("admin log metadata was not returned or searchable: %#v", logs)
+	}
+	report, err := st.ModelTokenDetails(ctx, "admin", admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Scope != "admin" || report.Name != admin.Username || report.Totals.Requests != 2 || report.Totals.InputTokens != 120 || report.Totals.OutputTokens != 107 {
+		t.Fatalf("unexpected admin model token report: %#v", report)
 	}
 }
 
