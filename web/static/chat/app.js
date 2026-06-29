@@ -374,12 +374,15 @@ function initChat(root) {
       const isUser = message.role === "user";
       const label = isUser ? userLabel : t("assistant");
       const avatar = isUser ? userAvatar : assistantAvatar;
+      const body = !isUser && !message.content && activeStream()
+        ? `<div class="chat-loading-dots"><span></span><span></span><span></span></div>`
+        : `<div class="markdown-body">${renderMarkdown(message.content || "", t("copy"))}${renderSources(message, t("sources"))}${renderUsage(message)}</div>`;
       return `
       <article class="chat-message ${isUser ? "user" : "assistant"}">
         <div class="chat-message-avatar" aria-hidden="true">${esc(avatar)}</div>
         <div class="chat-message-stack">
           <div class="chat-message-role">${esc(label)}</div>
-          <div class="markdown-body">${renderMarkdown(message.content || "", t("copy"))}${renderSources(message, t("sources"))}${renderUsage(message)}</div>
+          ${body}
         </div>
       </article>`;
     }).join("");
@@ -1042,7 +1045,7 @@ function initChat(root) {
 
   function autosizeInput() {
     el.input.style.height = "auto";
-    el.input.style.height = `${Math.min(el.input.scrollHeight, 220)}px`;
+    el.input.style.height = `${Math.min(el.input.scrollHeight, 320)}px`;
   }
 }
 
