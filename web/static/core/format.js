@@ -14,6 +14,13 @@ export function formatToken(value) {
   return formatCompactNumber(value);
 }
 
+export function formatMicroUSD(value) {
+  const usd = Number(value || 0) / 1000000;
+  if (!Number.isFinite(usd) || usd <= 0) return "$0.00";
+  const digits = usd < 0.01 ? 6 : usd < 1 ? 4 : 2;
+  return `$${usd.toFixed(digits)}`;
+}
+
 export function date(value) {
   return value ? new Date(value).toLocaleString() : "";
 }

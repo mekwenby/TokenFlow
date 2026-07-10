@@ -781,6 +781,93 @@ func TestStoreModelTokenDetails(t *testing.T) {
 	}
 }
 
+func TestProviderModelPricesAndCostReports(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	provider, err := st.CreateProvider(ctx, ProviderInput{
+		Name:         "priced",
+		Protocol:     "openai",
+		BaseAPI:      "https://priced.example.test/v1",
+		APIKeyCipher: "cipher",
+		DefaultModel: "model-a",
+		Models:       []string{"model-a", "model-b"},
+		Enabled:      true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID := provider.ID
+	if _, err := st.UpdateProviderModelPrices(ctx, provider.ID, []ProviderModelPrice{{
+		Model:                                "model-a",
+		InputPriceMicroUSDPerMillion:         2_000_000,
+		OutputPriceMicroUSDPerMillion:        8_000_000,
+		CacheReadPriceMicroUSDPerMillion:     500_000,
+		CacheCreationPriceMicroUSDPerMillion: 2_000_000,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	prices, err := st.ProviderModelPrices(ctx, provider.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prices) != 1 || prices[0].InputPriceUSDPerMillion != 2 || prices[0].CacheReadPriceUSDPerMillion != 0.5 {
+		t.Fatalf("unexpected prices: %#v", prices)
+	}
+	if _, err := st.UpdateProviderModelPrices(ctx, provider.ID, []ProviderModelPrice{{Model: "bad", InputPriceMicroUSDPerMillion: -1}}); err != ErrInvalidPrice {
+		t.Fatalf("negative price should be rejected, got %v", err)
+	}
+	for _, log := range []RequestLog{
+		{Protocol: "openai", Model: "client-a", UpstreamModel: "model-a", ProviderID: &providerID, StatusCode: 200, LatencyMS: 1, InputTokens: 1_000_000, OutputTokens: 500_000, CacheReadTokens: 100_000, CacheCreationTokens: 25_000},
+		{Protocol: "openai", Model: "client-b", UpstreamModel: "model-b", ProviderID: &providerID, StatusCode: 200, LatencyMS: 1, InputTokens: 1_000},
+	} {
+		if err := st.RecordRequest(ctx, log); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stats, err := st.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.CostMicroUSD != 6_100_000 || stats.UnpricedModelCount != 1 {
+		t.Fatalf("unexpected cost stats: %#v", stats)
+	}
+	logs, err := st.Logs(ctx, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 2 || !logs[0].Unpriced || logs[1].CostMicroUSD != 6_100_000 {
+		t.Fatalf("logs did not include calculated costs: %#v", logs)
+	}
+	report, err := st.ModelTokenDetails(ctx, "provider", provider.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Totals.CostMicroUSD != 6_100_000 || !report.Totals.Unpriced || len(report.UnpricedModels) != 1 {
+		t.Fatalf("model detail costs were not calculated: %#v", report)
+	}
+
+	if _, err := st.UpdateProviderModelPrices(ctx, provider.ID, []ProviderModelPrice{{
+		Model:                         "model-a",
+		InputPriceMicroUSDPerMillion:  4_000_000,
+		OutputPriceMicroUSDPerMillion: 8_000_000,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	stats, err = st.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.CostMicroUSD != 8_000_000 {
+		t.Fatalf("historical costs should be recomputed with current prices: %#v", stats)
+	}
+}
+
 func TestStoreChatConversationsAreScopedAndCascade(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(filepath.Join(t.TempDir(), "gateway.db"))

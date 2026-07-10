@@ -1,10 +1,10 @@
 import { createAPIClient } from "../core/api.js";
 import { Store } from "../core/state.js";
-import { esc, cookie, loadingHTML, errorHTML, setRegionLoading, setRegionError, clearRegionBusy, withFormBusy } from "../core/dom.js";
-import { date, percent, formatToken, formatCompactNumber } from "../core/format.js";
+import { esc, loadingHTML, errorHTML, setRegionLoading, setRegionError, clearRegionBusy, withFormBusy } from "../core/dom.js";
+import { date, percent, formatToken, formatCompactNumber, formatMicroUSD } from "../core/format.js";
 import { showToast, copyText, icon, iconActionButton, copyButton } from "../core/toast.js";
 import { confirmAction } from "../core/confirm.js";
-import { initSectionNav } from "../core/nav.js";
+import { initViewNav } from "../core/nav.js";
 import { renderTable, statusPill } from "../components/data-table.js";
 import { renderBarChart, renderLineChart } from "../components/chart.js";
 import { openForm, closeForm, populateForm, submitForm, confirmDelete } from "../components/crud-manager.js";
@@ -13,7 +13,6 @@ import { openForm, closeForm, populateForm, submitForm, confirmDelete } from "..
 const i18n = window.__ADMIN_I18N__ || {};
 const t = (key) => i18n[key] || key;
 const api = createAPIClient({ csrfCookie: "gateway_csrf", defaultError: t("request_failed") });
-const csrf = () => cookie("gateway_csrf");
 
 const tokenUsageSeries = [
   { key: "input_tokens", labelKey: "input_tokens", color: "#1a73e8" },
@@ -25,6 +24,7 @@ const tokenUsageSeries = [
 // -- State -------------------------------------------------------------------
 const state = new Store({
   providers: [], mappings: [], keys: [], users: [],
+  providerPrices: {},
   logsLimit: 50, logsOffset: 0, logsTotal: 0, logsQuery: "",
   tokenUsageRange: "24h",
 });
@@ -80,6 +80,19 @@ function truncateText(value, maxLen = 24) {
   return text.length > maxLen ? `${text.slice(0, maxLen - 1)}...` : text;
 }
 
+function priceValue(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) && number > 0 ? number : 0;
+}
+
+function providerModels(provider) {
+  return Array.from(new Set([provider?.default_model, ...(provider?.models || [])].map((m) => String(m || "").trim()).filter(Boolean)));
+}
+
+function priceInput(name, model, value) {
+  return `<input name="${name}" data-model="${esc(model)}" type="number" min="0" step="0.000001" value="${esc(priceValue(value))}">`;
+}
+
 // -- Render: API Addresses ---------------------------------------------------
 function renderAPIAddresses() {
   const target = document.querySelector("#api-addresses");
@@ -108,6 +121,8 @@ function renderStats(stats) {
     [t("requests"), stats.total_requests],
     [t("input_tokens"), formatToken(stats.input_tokens)],
     [t("output_tokens"), formatToken(stats.output_tokens)],
+    [t("cost"), formatMicroUSD(stats.cost_micro_usd)],
+    [t("unpriced_models"), stats.unpriced_model_count || 0],
     [t("active_keys"), stats.active_keys],
     [t("active_users"), stats.active_users],
     [t("pending_users"), stats.pending_users],
@@ -129,6 +144,7 @@ function renderTokenUsage(report) {
   for (const s of tokenUsageSeries) {
     totals[s.key] = points.reduce((sum, p) => sum + (Number(p?.[s.key]) || 0), 0);
   }
+  totals.cost_micro_usd = points.reduce((sum, p) => sum + (Number(p?.cost_micro_usd) || 0), 0);
   const totalTokens = totals.input_tokens + totals.output_tokens;
   const legend = tokenUsageSeries.map((s) => `
     <span class="usage-legend-item">
@@ -138,7 +154,7 @@ function renderTokenUsage(report) {
     </span>`).join("");
   const summary = `
     <div class="usage-summary">
-      <span>${esc(t("total_tokens"))} <strong>${formatToken(totalTokens)}</strong></span>
+      <span>${esc(t("total_tokens"))} <strong>${formatToken(totalTokens)}</strong> ${esc(t("cost"))} <strong>${formatMicroUSD(totals.cost_micro_usd)}</strong></span>
       <div class="usage-legend">${legend}</div>
     </div>`;
 
@@ -214,10 +230,43 @@ function renderProviders() {
     emptyText: t("empty"),
     actions: (p) => actionButtons(
       ["detail-provider", p.id, t("details"), "chart"],
+      ["edit-prices", p.id, t("prices"), "chart"],
       ["edit-provider", p.id, t("edit"), "edit"],
       ["delete-provider", p.id, t("delete"), "trash", "danger"],
     ),
   });
+}
+
+function renderProviderPricesEditor(provider, prices) {
+  const form = document.querySelector("#provider-prices-form");
+  const target = document.querySelector("#provider-prices-editor");
+  if (!form || !target) return;
+  form.elements.provider_id.value = provider.id;
+  const byModel = new Map((prices || []).map((price) => [price.model, price]));
+  const models = providerModels(provider);
+  if (!models.length) {
+    target.innerHTML = `<p class="empty">${esc(t("empty"))}</p>`;
+    return;
+  }
+  target.innerHTML = `<table>
+    <thead><tr>
+      <th>${esc(t("model"))}</th>
+      <th>${esc(t("input_price"))}</th>
+      <th>${esc(t("output_price"))}</th>
+      <th>${esc(t("cache_read_price"))}</th>
+      <th>${esc(t("cache_creation_price"))}</th>
+    </tr></thead>
+    <tbody>${models.map((model) => {
+      const price = byModel.get(model) || {};
+      return `<tr data-price-model="${esc(model)}">
+        <td><code>${esc(model)}</code></td>
+        <td>${priceInput("input_price_usd_per_million", model, price.input_price_usd_per_million)}</td>
+        <td>${priceInput("output_price_usd_per_million", model, price.output_price_usd_per_million)}</td>
+        <td>${priceInput("cache_read_price_usd_per_million", model, price.cache_read_price_usd_per_million)}</td>
+        <td>${priceInput("cache_creation_price_usd_per_million", model, price.cache_creation_price_usd_per_million)}</td>
+      </tr>`;
+    }).join("")}</tbody>
+  </table>`;
 }
 
 function renderMappings() {
@@ -333,12 +382,13 @@ function renderLogTable(items) {
       <td>${formatToken(l.cache_read_tokens)}</td>
       <td>${percent(l.cache_hit_rate)}</td>
       <td>${formatToken(l.output_tokens)}</td>
+      <td>${formatMicroUSD(l.cost_micro_usd)}${l.unpriced ? ` <span class="badge">${esc(t("unpriced"))}</span>` : ""}</td>
       <td>${l.latency_ms != null ? `${l.latency_ms}ms` : "-"}</td>
     </tr>`).join("");
   return `<div class="table-wrap"><table><thead><tr>
     <th>${t("time")}</th><th>${t("key")}</th><th>${t("consumer_user")}</th><th>${t("admin")}</th><th>${t("client_model")}</th>
     <th>${t("upstream_provider")}</th><th>${t("upstream_model")}</th><th>${t("status")}</th>
-    <th>${t("input_tokens")}</th><th>${t("cache_read_tokens")}</th><th>${t("cache_hit_rate")}</th><th>${t("output_tokens")}</th><th>${t("latency")}</th>
+    <th>${t("input_tokens")}</th><th>${t("cache_read_tokens")}</th><th>${t("cache_hit_rate")}</th><th>${t("output_tokens")}</th><th>${t("cost")}</th><th>${t("latency")}</th>
   </tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
@@ -360,6 +410,47 @@ function renderLogPager() {
       ${prevButton}
       <button type="button" class="secondary" data-action="logs-page" data-id="next" ${nextDisabled}>${esc(t("next_page"))}</button>
     </div>`;
+}
+
+const fullscreenSections = {
+  keys: { section: "#keys-section", button: "#keys-fullscreen-toggle", className: "keys-fullscreen" },
+  logs: { section: "#logs-section", button: "#logs-fullscreen-toggle", className: "logs-fullscreen" },
+};
+
+function setTableFullscreen(name, on) {
+  const config = fullscreenSections[name];
+  if (!config) return;
+  if (on) {
+    for (const otherName of Object.keys(fullscreenSections)) {
+      if (otherName !== name) setTableFullscreen(otherName, false);
+    }
+  }
+  const section = document.querySelector(config.section);
+  const button = document.querySelector(config.button);
+  if (!section || !button) return;
+  section.classList.toggle(config.className, on);
+  const label = on ? t("exit_fullscreen") : t("fullscreen");
+  button.setAttribute("title", label);
+  button.setAttribute("aria-label", label);
+  button.setAttribute("aria-pressed", on ? "true" : "false");
+  button.innerHTML = icon(on ? "fullscreen-exit" : "fullscreen");
+  document.body.classList.toggle("table-fullscreen-open", hasActiveTableFullscreen());
+}
+
+function hasActiveTableFullscreen() {
+  return Object.values(fullscreenSections).some((config) =>
+    document.querySelector(config.section)?.classList.contains(config.className));
+}
+
+function closeActiveTableFullscreen() {
+  let closed = false;
+  for (const [name, config] of Object.entries(fullscreenSections)) {
+    if (document.querySelector(config.section)?.classList.contains(config.className)) {
+      setTableFullscreen(name, false);
+      closed = true;
+    }
+  }
+  return closed;
 }
 
 // -- Model Details -----------------------------------------------------------
@@ -402,6 +493,7 @@ function renderModelDetails(body, subtitle, report) {
       ${detailStat(t("cache_read_tokens"), formatToken(totals.cache_read_tokens))}
       ${detailStat(t("cache_creation_tokens"), formatToken(totals.cache_creation_tokens))}
       ${detailStat(t("cache_hit_rate"), percent(totals.cache_hit_rate))}
+      ${detailStat(t("cost"), `${formatMicroUSD(totals.cost_micro_usd)}${totals.unpriced ? ` ${t("unpriced")}` : ""}`)}
     </div>`;
   if (!items.length) {
     body.innerHTML = `${summary}<p class="empty">${esc(t("empty"))}</p>`;
@@ -417,7 +509,7 @@ function renderModelDetails(body, subtitle, report) {
   body.innerHTML = `${summary}${chartHTML}
     <div class="table-wrap detail-table">
       <table>
-        <thead><tr><th>${t("model")}</th><th>${t("requests")}</th><th>${t("total_tokens")}</th><th>${t("input_tokens")}</th><th>${t("output_tokens")}</th><th>${t("cache_read_tokens")}</th><th>${t("cache_creation_tokens")}</th><th>${t("cache_hit_rate")}</th></tr></thead>
+        <thead><tr><th>${t("model")}</th><th>${t("requests")}</th><th>${t("total_tokens")}</th><th>${t("input_tokens")}</th><th>${t("output_tokens")}</th><th>${t("cache_read_tokens")}</th><th>${t("cache_creation_tokens")}</th><th>${t("cache_hit_rate")}</th><th>${t("cost")}</th></tr></thead>
         <tbody>${items.map((item) => `
           <tr>
             <td>${esc(item.model || "-")}</td>
@@ -428,6 +520,7 @@ function renderModelDetails(body, subtitle, report) {
             <td>${formatToken(item.cache_read_tokens)}</td>
             <td>${formatToken(item.cache_creation_tokens)}</td>
             <td>${percent(item.cache_hit_rate)}</td>
+            <td>${formatMicroUSD(item.cost_micro_usd)}${item.unpriced ? ` <span class="badge">${esc(t("unpriced"))}</span>` : ""}</td>
           </tr>`).join("")}</tbody>
       </table>
     </div>`;
@@ -438,37 +531,132 @@ function detailStat(label, value) {
 }
 
 // -- Data Loading ------------------------------------------------------------
-async function loadAll() {
-  renderAPIAddresses();
-  for (const selector of ["#stats", "#token-usage", "#users", "#providers", "#mappings", "#keys"]) {
-    setLoading(selector);
-  }
-  const tasks = [
-    { name: "stats", selector: "#stats", promise: api("/admin/api/stats"), onSuccess: renderStats },
-    { name: "tokenUsage", selector: "#token-usage", promise: loadTokenUsageData(), onSuccess: renderTokenUsage },
-    { name: "providers", selector: "#providers", promise: api("/admin/api/providers"), onSuccess: (data) => { state.set("providers", data || []); renderProviders(); } },
-    { name: "mappings", selector: "#mappings", promise: api("/admin/api/model-mappings"), onSuccess: (data) => { state.set("mappings", data || []); renderMappings(); } },
-    { name: "keys", selector: "#keys", promise: api("/admin/api/keys"), onSuccess: (data) => { state.set("keys", data || []); renderKeys(); } },
-    { name: "users", selector: "#users", promise: api("/admin/api/users"), onSuccess: (data) => { state.set("users", data || []); renderUsers(); } },
-  ];
-  const results = await Promise.allSettled(tasks.map(async (task) => {
-    try {
-      const data = await task.promise;
-      task.onSuccess(data);
-    } catch (error) {
-      setError(task.selector, error);
-    }
-  }));
-  // Populate provider dropdown for mapping form
+const loadedViews = new Set();
+const pendingViews = new Map();
+let providersLoaded = false;
+let providersPending = null;
+
+function populateProviderSelect() {
   const sel = document.querySelector("#mapping-form [name=\"provider_id\"]");
   if (sel) {
     const providers = state.get("providers");
     sel.innerHTML = providers.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("");
   }
-  await loadLogs();
+}
+
+async function loadRegion(selector, task, onSuccess) {
+  setLoading(selector);
+  try {
+    const data = await task();
+    onSuccess(data);
+    return data;
+  } catch (error) {
+    setError(selector, error);
+    throw error;
+  }
+}
+
+async function loadOverview() {
+  const results = await Promise.allSettled([
+    loadRegion("#stats", () => api("/admin/api/stats"), renderStats),
+    loadRegion("#token-usage", loadTokenUsageData, renderTokenUsage),
+  ]);
+  const failed = results.find((result) => result.status === "rejected");
+  if (failed) throw failed.reason;
+}
+
+async function loadProvidersData({ force = false } = {}) {
+  if (providersLoaded && !force) {
+    renderProviders();
+    populateProviderSelect();
+    return state.get("providers");
+  }
+  if (providersPending && !force) return providersPending;
+
+  setLoading("#providers");
+  const request = api("/admin/api/providers")
+    .then((data) => {
+      state.set("providers", data || []);
+      providersLoaded = true;
+      renderProviders();
+      populateProviderSelect();
+      return data || [];
+    })
+    .catch((error) => {
+      setError("#providers", error);
+      throw error;
+    })
+    .finally(() => {
+      if (providersPending === request) providersPending = null;
+    });
+  providersPending = request;
+  return request;
+}
+
+async function loadMappings() {
+  setLoading("#mappings");
+  try {
+    await loadProvidersData();
+    const data = await api("/admin/api/model-mappings");
+    state.set("mappings", data || []);
+    renderMappings();
+  } catch (error) {
+    setError("#mappings", error);
+    throw error;
+  }
+}
+
+const viewLoaders = {
+  "overview": loadOverview,
+  "api-addresses": async () => renderAPIAddresses(),
+  "users": async () => loadRegion("#users", () => api("/admin/api/users"), (data) => {
+    state.set("users", data || []);
+    renderUsers();
+  }),
+  "providers": loadProvidersData,
+  "mappings": loadMappings,
+  "keys": async () => loadRegion("#keys", () => api("/admin/api/keys"), (data) => {
+    state.set("keys", data || []);
+    renderKeys();
+  }),
+  "logs": () => loadLogs(),
+  "more": async () => {},
+};
+
+function invalidateViews(...views) {
+  for (const view of views) loadedViews.delete(view);
+  if (views.includes("providers")) {
+    providersLoaded = false;
+    providersPending = null;
+  }
+}
+
+async function ensureViewLoaded(view) {
+  if (loadedViews.has(view)) return;
+  if (pendingViews.has(view)) return pendingViews.get(view);
+  const loader = viewLoaders[view] || viewLoaders.overview;
+  const request = Promise.resolve()
+    .then(loader)
+    .then(() => loadedViews.add(view))
+    .finally(() => pendingViews.delete(view));
+  pendingViews.set(view, request);
+  return request;
+}
+
+async function refreshView(view, ...relatedViews) {
+  invalidateViews(view, ...relatedViews);
+  await ensureViewLoaded(view);
 }
 
 async function loadTokenUsageData() { return api(tokenUsageURL()); }
+
+async function loadProviderPrices(providerId) {
+  const prices = await api(`/admin/api/provider-model-prices?provider_id=${encodeURIComponent(providerId)}`);
+  const all = { ...(state.get("providerPrices") || {}) };
+  all[String(providerId)] = prices || [];
+  state.set("providerPrices", all);
+  return prices || [];
+}
 
 async function loadLogs(showLoading = true) {
   if (showLoading) setLoading("#logs");
@@ -482,7 +670,7 @@ async function loadLogs(showLoading = true) {
     renderLogs(page.items || []);
   } catch (error) {
     setError("#logs", error);
-    showError(error);
+    throw error;
   }
 }
 
@@ -517,6 +705,17 @@ const actions = {
   "detail-user": (target) => openModelDetails("user", target.dataset.id),
   "open": (target) => openForm(target.dataset.id),
   "cancel": (target) => closeForm(target.closest("form")),
+  "edit-prices": async (target) => {
+    const p = state.get("providers").find((x) => String(x.id) === target.dataset.id);
+    if (!p) return;
+    const form = document.querySelector("#provider-prices-form");
+    openForm("provider-prices-form");
+    const editor = document.querySelector("#provider-prices-editor");
+    if (editor) editor.innerHTML = loadingHTML(t("loading"));
+    const prices = await loadProviderPrices(p.id);
+    renderProviderPricesEditor(p, prices);
+    form?.scrollIntoView({ behavior: "smooth", block: "start" });
+  },
   "edit-provider": (target) => {
     const p = state.get("providers").find((x) => String(x.id) === target.dataset.id);
     if (!p) return;
@@ -534,7 +733,7 @@ const actions = {
   "delete-provider": (target) => confirmDelete({
     message: t("delete_provider_confirm"), confirmLabel: t("delete"),
     apiCall: () => api(`/admin/api/providers?id=${target.dataset.id}`, { method: "DELETE" }),
-    onSuccess: loadAll, t,
+    onSuccess: () => refreshView("providers", "mappings", "overview", "logs"), t,
   }),
   "edit-mapping": (target) => {
     const m = state.get("mappings").find((x) => String(x.id) === target.dataset.id);
@@ -549,7 +748,7 @@ const actions = {
   "delete-mapping": (target) => confirmDelete({
     message: t("delete_mapping_confirm"), confirmLabel: t("delete"),
     apiCall: () => api(`/admin/api/model-mappings?id=${target.dataset.id}`, { method: "DELETE" }),
-    onSuccess: loadAll, t,
+    onSuccess: () => refreshView("mappings"), t,
   }),
   "edit-user": (target) => {
     const u = state.get("users").find((x) => String(x.id) === target.dataset.id);
@@ -573,20 +772,28 @@ const actions = {
   "delete-key": (target) => confirmDelete({
     message: t("delete_key_confirm"), confirmLabel: t("delete"),
     apiCall: () => api(`/admin/api/keys?id=${target.dataset.id}`, { method: "DELETE" }),
-    onSuccess: loadAll, t,
+    onSuccess: () => refreshView("keys", "overview", "logs"), t,
   }),
   "reset-key": async (target) => {
     if (!(await confirmAction({ title: t("confirm_title"), message: t("reset_key_confirm"), confirmLabel: t("reset_key"), cancelLabel: t("cancel"), tone: "danger" }))) return;
     const key = await api("/admin/api/keys/reset", { method: "POST", body: JSON.stringify({ id: Number(target.dataset.id || 0) }) });
-    await loadAll();
+    await refreshView("keys", "overview");
     if (key.plain_key) renderNewKey(key.plain_key);
     showToast(t("saved"));
   },
   "reset-key-stats": (target) => confirmDelete({
     message: t("reset_key_stats_confirm"), confirmLabel: t("reset_key_stats"),
     apiCall: () => api("/admin/api/keys/reset-stats", { method: "POST", body: JSON.stringify({ id: Number(target.dataset.id || 0) }) }),
-    onSuccess: loadAll, t,
+    onSuccess: () => refreshView("keys", "overview"), t,
   }),
+  "toggle-keys-fullscreen": () => {
+    const section = document.querySelector("#keys-section");
+    setTableFullscreen("keys", !section?.classList.contains("keys-fullscreen"));
+  },
+  "toggle-logs-fullscreen": () => {
+    const section = document.querySelector("#logs-section");
+    setTableFullscreen("logs", !section?.classList.contains("logs-fullscreen"));
+  },
   "logs-page": async (target) => {
     const dir = target.dataset.id;
     const off = state.get("logsOffset"), lim = state.get("logsLimit");
@@ -607,7 +814,9 @@ document.addEventListener("click", (event) => {
 });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") closeModelDetails();
+  if (event.key !== "Escape") return;
+  if (closeActiveTableFullscreen()) return;
+  closeModelDetails();
 });
 
 // -- Form Submissions --------------------------------------------------------
@@ -621,7 +830,34 @@ document.querySelector("#provider-form")?.addEventListener("submit", async (even
     data.enabled = form.elements.enabled.checked;
     data.is_default = form.elements.is_default.checked;
     return api("/admin/api/providers", { method: data.id ? "PUT" : "POST", body: JSON.stringify(data) });
-  }, loadAll);
+  }, () => refreshView("providers", "mappings", "overview", "logs"));
+});
+
+document.querySelector("#provider-prices-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  await submitForm(form, async () => {
+    const providerId = Number(form.elements.provider_id.value || 0);
+    const items = Array.from(form.querySelectorAll("[data-price-model]")).map((row) => {
+      const read = (name) => Number(row.querySelector(`[name="${name}"]`)?.value || 0);
+      return {
+        model: row.dataset.priceModel || "",
+        input_price_usd_per_million: read("input_price_usd_per_million"),
+        output_price_usd_per_million: read("output_price_usd_per_million"),
+        cache_read_price_usd_per_million: read("cache_read_price_usd_per_million"),
+        cache_creation_price_usd_per_million: read("cache_creation_price_usd_per_million"),
+      };
+    });
+    return {
+      providerId,
+      prices: await api("/admin/api/provider-model-prices", { method: "PUT", body: JSON.stringify({ provider_id: providerId, items }) }),
+    };
+  }, ({ providerId, prices }) => {
+    const all = { ...(state.get("providerPrices") || {}) };
+    all[String(providerId)] = prices || [];
+    state.set("providerPrices", all);
+    invalidateViews("overview", "logs");
+  });
 });
 
 document.querySelector("#mapping-form")?.addEventListener("submit", async (event) => {
@@ -632,7 +868,7 @@ document.querySelector("#mapping-form")?.addEventListener("submit", async (event
     data.id = Number(data.id || 0);
     data.provider_id = Number(data.provider_id || 0);
     return api("/admin/api/model-mappings", { method: data.id ? "PUT" : "POST", body: JSON.stringify(data) });
-  }, loadAll);
+  }, () => refreshView("mappings"));
 });
 
 document.querySelector("#user-form")?.addEventListener("submit", async (event) => {
@@ -643,7 +879,7 @@ document.querySelector("#user-form")?.addEventListener("submit", async (event) =
     data.id = Number(data.id || 0);
     data.quota_total_tokens = Number(data.quota_total_tokens || 0);
     return api("/admin/api/users", { method: "PUT", body: JSON.stringify(data) });
-  }, loadAll);
+  }, () => refreshView("users", "overview"));
 });
 
 document.querySelector("#key-form")?.addEventListener("submit", async (event) => {
@@ -653,18 +889,18 @@ document.querySelector("#key-form")?.addEventListener("submit", async (event) =>
     const data = formData(form);
     data.id = Number(data.id || 0);
     data.enabled = form.elements.enabled.checked;
-    const key = await api("/admin/api/keys", { method: data.id ? "PUT" : "POST", body: JSON.stringify(data) });
-    closeForm(form);
-    await loadAll();
+    return api("/admin/api/keys", { method: data.id ? "PUT" : "POST", body: JSON.stringify(data) });
+  }, async (key) => {
+    await refreshView("keys", "overview", "logs");
     if (key.plain_key) renderNewKey(key.plain_key);
-  }, loadAll);
+  });
 });
 
 document.querySelector("#logs-search-form")?.addEventListener("submit", async (event) => {
   event.preventDefault();
   state.set("logsQuery", String(new FormData(event.currentTarget).get("q") || "").trim());
   state.set("logsOffset", 0);
-  await loadLogs();
+  await loadLogs().catch(showError);
 });
 
 // -- Init --------------------------------------------------------------------
@@ -679,5 +915,12 @@ async function loadTokenUsage() {
   }
 }
 
-initSectionNav();
-loadAll().catch(showError);
+initViewNav({
+  onViewChange: (view, previousView) => {
+    if (previousView && previousView !== view) {
+      closeActiveTableFullscreen();
+      closeModelDetails();
+    }
+    return ensureViewLoaded(view).catch(showError);
+  },
+});

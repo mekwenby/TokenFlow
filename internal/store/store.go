@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -118,6 +119,8 @@ type RequestLog struct {
 	CacheReadTokens     int64     `json:"cache_read_tokens"`
 	CacheCreationTokens int64     `json:"cache_creation_tokens"`
 	CacheHitRate        float64   `json:"cache_hit_rate"`
+	CostMicroUSD        int64     `json:"cost_micro_usd"`
+	Unpriced            bool      `json:"unpriced"`
 	Stream              bool      `json:"stream"`
 	CreatedAt           time.Time `json:"created_at"`
 }
@@ -178,13 +181,15 @@ type ChatMessage struct {
 }
 
 type Stats struct {
-	TotalRequests int64 `json:"total_requests"`
-	InputTokens   int64 `json:"input_tokens"`
-	OutputTokens  int64 `json:"output_tokens"`
-	ActiveKeys    int64 `json:"active_keys"`
-	Providers     int64 `json:"providers"`
-	ActiveUsers   int64 `json:"active_users"`
-	PendingUsers  int64 `json:"pending_users"`
+	TotalRequests      int64 `json:"total_requests"`
+	InputTokens        int64 `json:"input_tokens"`
+	OutputTokens       int64 `json:"output_tokens"`
+	CostMicroUSD       int64 `json:"cost_micro_usd"`
+	UnpricedModelCount int64 `json:"unpriced_model_count"`
+	ActiveKeys         int64 `json:"active_keys"`
+	Providers          int64 `json:"providers"`
+	ActiveUsers        int64 `json:"active_users"`
+	PendingUsers       int64 `json:"pending_users"`
 }
 
 type TokenUsageReport struct {
@@ -192,6 +197,7 @@ type TokenUsageReport struct {
 	Granularity           string            `json:"granularity"`
 	TimezoneOffsetMinutes int               `json:"timezone_offset_minutes"`
 	Points                []TokenUsagePoint `json:"points"`
+	UnpricedModels        []string          `json:"unpriced_models"`
 }
 
 type TokenUsagePoint struct {
@@ -201,14 +207,16 @@ type TokenUsagePoint struct {
 	OutputTokens        int64     `json:"output_tokens"`
 	CacheReadTokens     int64     `json:"cache_read_tokens"`
 	CacheCreationTokens int64     `json:"cache_creation_tokens"`
+	CostMicroUSD        int64     `json:"cost_micro_usd"`
 }
 
 type ModelTokenDetailReport struct {
-	Scope  string                 `json:"scope"`
-	ID     int64                  `json:"id"`
-	Name   string                 `json:"name"`
-	Totals ModelTokenDetailTotals `json:"totals"`
-	Items  []ModelTokenDetailItem `json:"items"`
+	Scope          string                 `json:"scope"`
+	ID             int64                  `json:"id"`
+	Name           string                 `json:"name"`
+	Totals         ModelTokenDetailTotals `json:"totals"`
+	Items          []ModelTokenDetailItem `json:"items"`
+	UnpricedModels []string               `json:"unpriced_models"`
 }
 
 type ModelTokenDetailTotals struct {
@@ -218,7 +226,9 @@ type ModelTokenDetailTotals struct {
 	OutputTokens        int64   `json:"output_tokens"`
 	CacheReadTokens     int64   `json:"cache_read_tokens"`
 	CacheCreationTokens int64   `json:"cache_creation_tokens"`
+	CostMicroUSD        int64   `json:"cost_micro_usd"`
 	CacheHitRate        float64 `json:"cache_hit_rate"`
+	Unpriced            bool    `json:"unpriced"`
 }
 
 type ModelTokenDetailItem struct {
@@ -229,7 +239,23 @@ type ModelTokenDetailItem struct {
 	OutputTokens        int64   `json:"output_tokens"`
 	CacheReadTokens     int64   `json:"cache_read_tokens"`
 	CacheCreationTokens int64   `json:"cache_creation_tokens"`
+	CostMicroUSD        int64   `json:"cost_micro_usd"`
 	CacheHitRate        float64 `json:"cache_hit_rate"`
+	Unpriced            bool    `json:"unpriced"`
+}
+
+type ProviderModelPrice struct {
+	ProviderID                           int64     `json:"provider_id"`
+	Model                                string    `json:"model"`
+	InputPriceMicroUSDPerMillion         int64     `json:"input_price_microusd_per_million"`
+	OutputPriceMicroUSDPerMillion        int64     `json:"output_price_microusd_per_million"`
+	CacheReadPriceMicroUSDPerMillion     int64     `json:"cache_read_price_microusd_per_million"`
+	CacheCreationPriceMicroUSDPerMillion int64     `json:"cache_creation_price_microusd_per_million"`
+	InputPriceUSDPerMillion              float64   `json:"input_price_usd_per_million"`
+	OutputPriceUSDPerMillion             float64   `json:"output_price_usd_per_million"`
+	CacheReadPriceUSDPerMillion          float64   `json:"cache_read_price_usd_per_million"`
+	CacheCreationPriceUSDPerMillion      float64   `json:"cache_creation_price_usd_per_million"`
+	UpdatedAt                            time.Time `json:"updated_at"`
 }
 
 type Route struct {
@@ -255,6 +281,7 @@ var (
 	ErrInvalidModelScope       = errors.New("invalid model token detail scope")
 	ErrInvalidUserStatus       = errors.New("invalid consumer user status")
 	ErrInvalidChatMaxToolCalls = errors.New("max_tool_calls must be between 0 and 20")
+	ErrInvalidPrice            = errors.New("model prices must be non-negative")
 	ErrQuotaExceeded           = errors.New("quota exceeded")
 	ErrChatConversationBusy    = errors.New("conversation is already processing")
 )
@@ -331,6 +358,16 @@ func (s *Store) Migrate(ctx context.Context) error {
 			provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
 			upstream_model TEXT NOT NULL,
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE TABLE IF NOT EXISTS provider_model_prices (
+			provider_id INTEGER NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+			model TEXT NOT NULL,
+			input_price_microusd_per_million INTEGER NOT NULL DEFAULT 0,
+			output_price_microusd_per_million INTEGER NOT NULL DEFAULT 0,
+			cache_read_price_microusd_per_million INTEGER NOT NULL DEFAULT 0,
+			cache_creation_price_microusd_per_million INTEGER NOT NULL DEFAULT 0,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY(provider_id, model)
 		)`,
 		`CREATE TABLE IF NOT EXISTS distribution_keys (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -675,6 +712,9 @@ func (s *Store) ensureRequestLogCacheColumns(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_request_logs_admin_user_id ON request_logs(admin_user_id)`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_request_logs_provider_model ON request_logs(provider_id, upstream_model)`); err != nil {
 		return err
 	}
 	return nil
@@ -1142,6 +1182,74 @@ func (s *Store) Mappings(ctx context.Context) ([]ModelMapping, error) {
 	return mappings, rows.Err()
 }
 
+func (s *Store) ProviderModelPrices(ctx context.Context, providerID int64) ([]ProviderModelPrice, error) {
+	if _, err := s.Provider(ctx, providerID); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT provider_id, model, input_price_microusd_per_million, output_price_microusd_per_million, cache_read_price_microusd_per_million, cache_creation_price_microusd_per_million, updated_at
+		FROM provider_model_prices
+		WHERE provider_id = ?
+		ORDER BY model ASC`, providerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var prices []ProviderModelPrice
+	for rows.Next() {
+		var price ProviderModelPrice
+		var updatedAt string
+		if err := rows.Scan(&price.ProviderID, &price.Model, &price.InputPriceMicroUSDPerMillion, &price.OutputPriceMicroUSDPerMillion, &price.CacheReadPriceMicroUSDPerMillion, &price.CacheCreationPriceMicroUSDPerMillion, &updatedAt); err != nil {
+			return nil, err
+		}
+		price = hydrateProviderModelPrice(price, updatedAt)
+		prices = append(prices, price)
+	}
+	if prices == nil {
+		prices = []ProviderModelPrice{}
+	}
+	return prices, rows.Err()
+}
+
+func (s *Store) UpdateProviderModelPrices(ctx context.Context, providerID int64, items []ProviderModelPrice) ([]ProviderModelPrice, error) {
+	if _, err := s.Provider(ctx, providerID); err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	normalized := make([]ProviderModelPrice, 0, len(items))
+	for _, item := range items {
+		model := strings.TrimSpace(item.Model)
+		if model == "" || seen[model] {
+			continue
+		}
+		if item.InputPriceMicroUSDPerMillion < 0 || item.OutputPriceMicroUSDPerMillion < 0 || item.CacheReadPriceMicroUSDPerMillion < 0 || item.CacheCreationPriceMicroUSDPerMillion < 0 {
+			return nil, ErrInvalidPrice
+		}
+		seen[model] = true
+		item.ProviderID = providerID
+		item.Model = model
+		normalized = append(normalized, item)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM provider_model_prices WHERE provider_id = ?`, providerID); err != nil {
+		return nil, err
+	}
+	for _, item := range normalized {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO provider_model_prices(provider_id, model, input_price_microusd_per_million, output_price_microusd_per_million, cache_read_price_microusd_per_million, cache_creation_price_microusd_per_million, updated_at)
+			VALUES(?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+			item.ProviderID, item.Model, item.InputPriceMicroUSDPerMillion, item.OutputPriceMicroUSDPerMillion, item.CacheReadPriceMicroUSDPerMillion, item.CacheCreationPriceMicroUSDPerMillion); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return s.ProviderModelPrices(ctx, providerID)
+}
+
 func (s *Store) CreateDistributionKey(ctx context.Context, name, prefix, hash string) (DistributionKey, error) {
 	res, err := s.db.ExecContext(ctx, `INSERT INTO distribution_keys(name, prefix, key_hash, enabled) VALUES(?, ?, ?, 1)`, name, prefix, hash)
 	if err != nil {
@@ -1500,7 +1608,17 @@ func (s *Store) LogsSearch(ctx context.Context, limit, offset int, search string
 		}
 		logs = append(logs, l)
 	}
-	return logs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	prices, err := s.providerModelPriceMap(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range logs {
+		logs[i].CostMicroUSD, logs[i].Unpriced = costForUsage(prices, logs[i].ProviderID, logs[i].UpstreamModel, logs[i].InputTokens, logs[i].OutputTokens, logs[i].CacheReadTokens, logs[i].CacheCreationTokens)
+	}
+	return logs, nil
 }
 
 func (s *Store) LogCount(ctx context.Context) (int64, error) {
@@ -1969,33 +2087,47 @@ func (s *Store) ModelTokenDetails(ctx context.Context, scope string, id int64) (
 		return ModelTokenDetailReport{}, ErrInvalidModelScope
 	}
 
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`SELECT model, COUNT(*),
+	prices, err := s.providerModelPriceMap(ctx)
+	if err != nil {
+		return ModelTokenDetailReport{}, err
+	}
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`SELECT model, COALESCE(NULLIF(upstream_model, ''), model), provider_id, COALESCE(p.name, ''), COUNT(*),
 			COALESCE(SUM(input_tokens), 0),
 			COALESCE(SUM(output_tokens), 0),
 			COALESCE(SUM(cache_read_tokens), 0),
 			COALESCE(SUM(cache_creation_tokens), 0)
-		FROM request_logs
-		WHERE %s = ?
-		GROUP BY model
+		FROM request_logs l
+		LEFT JOIN providers p ON p.id = l.provider_id
+		WHERE l.%s = ?
+		GROUP BY model, COALESCE(NULLIF(upstream_model, ''), model), provider_id
 		ORDER BY COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) DESC, COUNT(*) DESC, model ASC`, filterColumn), id)
 	if err != nil {
 		return ModelTokenDetailReport{}, err
 	}
 	defer rows.Close()
+	unpriced := map[string]bool{}
 	for rows.Next() {
 		var item ModelTokenDetailItem
-		if err := rows.Scan(&item.Model, &item.Requests, &item.InputTokens, &item.OutputTokens, &item.CacheReadTokens, &item.CacheCreationTokens); err != nil {
+		var upstreamModel, providerName string
+		var providerID sql.NullInt64
+		if err := rows.Scan(&item.Model, &upstreamModel, &providerID, &providerName, &item.Requests, &item.InputTokens, &item.OutputTokens, &item.CacheReadTokens, &item.CacheCreationTokens); err != nil {
 			return ModelTokenDetailReport{}, err
 		}
 		item.TotalTokens = item.InputTokens + item.OutputTokens
 		if item.InputTokens > 0 && item.CacheReadTokens > 0 {
 			item.CacheHitRate = float64(item.CacheReadTokens) / float64(item.InputTokens)
 		}
+		item.CostMicroUSD, item.Unpriced = costForUsage(prices, int64PtrFromNull(providerID), upstreamModel, item.InputTokens, item.OutputTokens, item.CacheReadTokens, item.CacheCreationTokens)
+		if item.Unpriced {
+			unpriced[unpricedModelLabel(providerName, upstreamModel)] = true
+		}
 		report.Totals.Requests += item.Requests
 		report.Totals.InputTokens += item.InputTokens
 		report.Totals.OutputTokens += item.OutputTokens
 		report.Totals.CacheReadTokens += item.CacheReadTokens
 		report.Totals.CacheCreationTokens += item.CacheCreationTokens
+		report.Totals.CostMicroUSD += item.CostMicroUSD
+		report.Totals.Unpriced = report.Totals.Unpriced || item.Unpriced
 		report.Items = append(report.Items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -2005,6 +2137,7 @@ func (s *Store) ModelTokenDetails(ctx context.Context, scope string, id int64) (
 	if report.Totals.InputTokens > 0 && report.Totals.CacheReadTokens > 0 {
 		report.Totals.CacheHitRate = float64(report.Totals.CacheReadTokens) / float64(report.Totals.InputTokens)
 	}
+	report.UnpricedModels = sortedMapKeys(unpriced)
 	return report, nil
 }
 
@@ -2035,36 +2168,61 @@ func (s *Store) tokenUsageAt(ctx context.Context, usageRange string, tzOffsetMin
 
 	stepSeconds := int64(step / time.Second)
 	offsetSeconds := int64(tzOffsetMinutes) * 60
+	prices, err := s.providerModelPriceMap(ctx)
+	if err != nil {
+		return TokenUsageReport{}, err
+	}
 	rows, err := s.db.QueryContext(ctx, `SELECT
-			CAST((CAST(strftime('%s', created_at) AS INTEGER) + ?) / ? AS INTEGER) * ? - ? AS bucket_epoch,
+			CAST((CAST(strftime('%s', l.created_at) AS INTEGER) + ?) / ? AS INTEGER) * ? - ? AS bucket_epoch,
+			provider_id,
+			COALESCE(NULLIF(upstream_model, ''), model),
+			COALESCE(p.name, ''),
 			COUNT(*),
 			COALESCE(SUM(input_tokens), 0),
 			COALESCE(SUM(output_tokens), 0),
 			COALESCE(SUM(cache_read_tokens), 0),
 			COALESCE(SUM(cache_creation_tokens), 0)
-		FROM request_logs
-		WHERE CAST(strftime('%s', created_at) AS INTEGER) >= ?
-			AND CAST(strftime('%s', created_at) AS INTEGER) < ?
-		GROUP BY bucket_epoch
+		FROM request_logs l
+		LEFT JOIN providers p ON p.id = l.provider_id
+		WHERE CAST(strftime('%s', l.created_at) AS INTEGER) >= ?
+			AND CAST(strftime('%s', l.created_at) AS INTEGER) < ?
+		GROUP BY bucket_epoch, provider_id, COALESCE(NULLIF(upstream_model, ''), model)
 		ORDER BY bucket_epoch`,
 		offsetSeconds, stepSeconds, stepSeconds, offsetSeconds, start.Unix(), end.Unix())
 	if err != nil {
 		return TokenUsageReport{}, err
 	}
 	defer rows.Close()
+	unpriced := map[string]bool{}
 	for rows.Next() {
 		var bucketEpoch int64
 		var point TokenUsagePoint
-		if err := rows.Scan(&bucketEpoch, &point.Requests, &point.InputTokens, &point.OutputTokens, &point.CacheReadTokens, &point.CacheCreationTokens); err != nil {
+		var providerID sql.NullInt64
+		var upstreamModel, providerName string
+		if err := rows.Scan(&bucketEpoch, &providerID, &upstreamModel, &providerName, &point.Requests, &point.InputTokens, &point.OutputTokens, &point.CacheReadTokens, &point.CacheCreationTokens); err != nil {
 			return TokenUsageReport{}, err
 		}
 		point.BucketStart = time.Unix(bucketEpoch, 0).UTC()
+		cost, isUnpriced := costForUsage(prices, int64PtrFromNull(providerID), upstreamModel, point.InputTokens, point.OutputTokens, point.CacheReadTokens, point.CacheCreationTokens)
+		point.CostMicroUSD = cost
+		if isUnpriced {
+			unpriced[unpricedModelLabel(providerName, upstreamModel)] = true
+		}
 		idx := int(point.BucketStart.Sub(start) / step)
 		if idx >= 0 && idx < len(report.Points) {
-			report.Points[idx] = point
+			report.Points[idx].Requests += point.Requests
+			report.Points[idx].InputTokens += point.InputTokens
+			report.Points[idx].OutputTokens += point.OutputTokens
+			report.Points[idx].CacheReadTokens += point.CacheReadTokens
+			report.Points[idx].CacheCreationTokens += point.CacheCreationTokens
+			report.Points[idx].CostMicroUSD += point.CostMicroUSD
 		}
 	}
-	return report, rows.Err()
+	if err := rows.Err(); err != nil {
+		return TokenUsageReport{}, err
+	}
+	report.UnpricedModels = sortedMapKeys(unpriced)
+	return report, nil
 }
 
 func (s *Store) Stats(ctx context.Context) (Stats, error) {
@@ -2073,6 +2231,43 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 		Scan(&stats.TotalRequests, &stats.InputTokens, &stats.OutputTokens); err != nil {
 		return stats, err
 	}
+	prices, err := s.providerModelPriceMap(ctx)
+	if err != nil {
+		return stats, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT l.provider_id, COALESCE(NULLIF(l.upstream_model, ''), l.model), COUNT(*),
+			COALESCE(SUM(l.input_tokens), 0),
+			COALESCE(SUM(l.output_tokens), 0),
+			COALESCE(SUM(l.cache_read_tokens), 0),
+			COALESCE(SUM(l.cache_creation_tokens), 0)
+		FROM request_logs l
+		GROUP BY l.provider_id, COALESCE(NULLIF(l.upstream_model, ''), l.model)`)
+	if err != nil {
+		return stats, err
+	}
+	unpriced := map[string]bool{}
+	for rows.Next() {
+		var providerID sql.NullInt64
+		var model string
+		var requests, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int64
+		if err := rows.Scan(&providerID, &model, &requests, &inputTokens, &outputTokens, &cacheReadTokens, &cacheCreationTokens); err != nil {
+			rows.Close()
+			return stats, err
+		}
+		cost, isUnpriced := costForUsage(prices, int64PtrFromNull(providerID), model, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens)
+		stats.CostMicroUSD += cost
+		if requests > 0 && isUnpriced {
+			id := int64(0)
+			if providerID.Valid {
+				id = providerID.Int64
+			}
+			unpriced[fmt.Sprintf("%d:%s", id, model)] = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return stats, err
+	}
+	stats.UnpricedModelCount = int64(len(unpriced))
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM distribution_keys WHERE enabled = 1`).Scan(&stats.ActiveKeys); err != nil {
 		return stats, err
 	}
@@ -2192,6 +2387,103 @@ func normalizeTimezoneOffset(minutes int) int {
 func floorUsageBucket(t time.Time, step time.Duration, tzOffsetMinutes int) time.Time {
 	offset := time.Duration(tzOffsetMinutes) * time.Minute
 	return t.UTC().Add(offset).Truncate(step).Add(-offset).UTC()
+}
+
+type priceKey struct {
+	providerID int64
+	model      string
+}
+
+func (s *Store) providerModelPriceMap(ctx context.Context) (map[priceKey]ProviderModelPrice, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT provider_id, model, input_price_microusd_per_million, output_price_microusd_per_million, cache_read_price_microusd_per_million, cache_creation_price_microusd_per_million, updated_at
+		FROM provider_model_prices`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	prices := map[priceKey]ProviderModelPrice{}
+	for rows.Next() {
+		var price ProviderModelPrice
+		var updatedAt string
+		if err := rows.Scan(&price.ProviderID, &price.Model, &price.InputPriceMicroUSDPerMillion, &price.OutputPriceMicroUSDPerMillion, &price.CacheReadPriceMicroUSDPerMillion, &price.CacheCreationPriceMicroUSDPerMillion, &updatedAt); err != nil {
+			return nil, err
+		}
+		price = hydrateProviderModelPrice(price, updatedAt)
+		prices[priceKey{providerID: price.ProviderID, model: price.Model}] = price
+	}
+	return prices, rows.Err()
+}
+
+func costForUsage(prices map[priceKey]ProviderModelPrice, providerID *int64, model string, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int64) (int64, bool) {
+	if providerID == nil || strings.TrimSpace(model) == "" {
+		if inputTokens+outputTokens+cacheReadTokens+cacheCreationTokens > 0 {
+			return 0, true
+		}
+		return 0, false
+	}
+	price, ok := prices[priceKey{providerID: *providerID, model: strings.TrimSpace(model)}]
+	if !ok {
+		if inputTokens+outputTokens+cacheReadTokens+cacheCreationTokens > 0 {
+			return 0, true
+		}
+		return 0, false
+	}
+	cost := roundedMicroUSDCost(inputTokens, price.InputPriceMicroUSDPerMillion)
+	cost += roundedMicroUSDCost(outputTokens, price.OutputPriceMicroUSDPerMillion)
+	cost += roundedMicroUSDCost(cacheReadTokens, price.CacheReadPriceMicroUSDPerMillion)
+	cost += roundedMicroUSDCost(cacheCreationTokens, price.CacheCreationPriceMicroUSDPerMillion)
+	return cost, false
+}
+
+func roundedMicroUSDCost(tokens, priceMicroUSDPerMillion int64) int64 {
+	if tokens <= 0 || priceMicroUSDPerMillion <= 0 {
+		return 0
+	}
+	const denom = int64(1_000_000)
+	return (tokens*priceMicroUSDPerMillion + denom/2) / denom
+}
+
+func hydrateProviderModelPrice(price ProviderModelPrice, updatedAt string) ProviderModelPrice {
+	price.InputPriceUSDPerMillion = float64(price.InputPriceMicroUSDPerMillion) / 1_000_000
+	price.OutputPriceUSDPerMillion = float64(price.OutputPriceMicroUSDPerMillion) / 1_000_000
+	price.CacheReadPriceUSDPerMillion = float64(price.CacheReadPriceMicroUSDPerMillion) / 1_000_000
+	price.CacheCreationPriceUSDPerMillion = float64(price.CacheCreationPriceMicroUSDPerMillion) / 1_000_000
+	if updatedAt != "" {
+		price.UpdatedAt = parseDBTime(updatedAt)
+	}
+	return price
+}
+
+func int64PtrFromNull(value sql.NullInt64) *int64 {
+	if !value.Valid {
+		return nil
+	}
+	out := value.Int64
+	return &out
+}
+
+func sortedMapKeys(values map[string]bool) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func unpricedModelLabel(providerName, model string) string {
+	providerName = strings.TrimSpace(providerName)
+	model = strings.TrimSpace(model)
+	if providerName == "" {
+		return model
+	}
+	if model == "" {
+		return providerName
+	}
+	return providerName + "/" + model
 }
 
 type scanner interface {

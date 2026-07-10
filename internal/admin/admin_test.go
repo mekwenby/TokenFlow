@@ -123,13 +123,43 @@ func TestDashboardInjectsLanguageAndTranslations(t *testing.T) {
 		t.Fatalf("unexpected status: %d", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, expected := range []string{`<html lang="zh-CN">`, "TokenFlow", "tokenflow-logo.svg", "icons.svg", "admin/app.js", "上游供应商", "支持模型", "用户", `id="api-addresses"`, `id="token-usage"`, `id="detail-modal"`, `id="logs-search-form"`, `window.__ADMIN_LANG__ = "zh-CN"`, `"requests":"请求数"`, `"api_addresses":"API 地址"`, `"token_usage":"Token 使用趋势"`, `"model_token_details":"模型 Token 明细"`, `"detail_scope_user":"用户"`, `"active_users":"启用用户"`, `"pending_users":"待审核用户"`, `"logs_search":"搜索请求"`, `"cache_hit_rate":"缓存命中率"`, `"previous_page":"上一页"`, `"next_page":"下一页"`, `"reset_key":"重新生成"`, `"reset_key_stats":"重置统计"`, `"distribution_key":"Key 名称"`, `"copy":"复制"`, `"copied":"已复制"`} {
+	for _, expected := range []string{`<html lang="zh-CN">`, "TokenFlow", "tokenflow-logo.svg", "icons.svg", "admin/app.js", "上游供应商", "支持模型", "用户", `id="api-addresses"`, `id="token-usage"`, `id="detail-modal"`, `id="logs-search-form"`, `id="keys-fullscreen-toggle"`, `id="logs-fullscreen-toggle"`, `data-action="toggle-keys-fullscreen"`, `data-action="toggle-logs-fullscreen"`, `window.__ADMIN_LANG__ = "zh-CN"`, `"requests":"请求数"`, `"api_addresses":"API 地址"`, `"token_usage":"Token 使用趋势"`, `"model_token_details":"模型 Token 明细"`, `"detail_scope_user":"用户"`, `"active_users":"启用用户"`, `"pending_users":"待审核用户"`, `"logs_search":"搜索请求"`, `"fullscreen":"全屏显示"`, `"exit_fullscreen":"退出全屏"`, `"cache_hit_rate":"缓存命中率"`, `"previous_page":"上一页"`, `"next_page":"下一页"`, `"reset_key":"重新生成"`, `"reset_key_stats":"重置统计"`, `"distribution_key":"Key 名称"`, `"copy":"复制"`, `"copied":"已复制"`, `"more":"更多"`, `"admin_navigation":"管理后台分区"`} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("missing %q in dashboard:\n%s", expected, body)
 		}
 	}
 	if !strings.Contains(body, `href="/admin/chat"`) {
 		t.Fatalf("admin dashboard should expose chat from the top bar:\n%s", body)
+	}
+	for _, view := range []string{"overview", "api-addresses", "users", "providers", "mappings", "keys", "logs", "more"} {
+		if !strings.Contains(body, `data-admin-view="`+view+`"`) {
+			t.Fatalf("dashboard is missing %q view", view)
+		}
+	}
+	for _, hash := range []string{"#overview", "#api-addresses", "#users", "#providers", "#mappings", "#keys", "#logs", "#more"} {
+		if !strings.Contains(body, `href="`+hash+`"`) {
+			t.Fatalf("dashboard is missing canonical hash %q", hash)
+		}
+	}
+	mobileStart := strings.Index(body, `<nav class="mobile-nav"`)
+	if mobileStart < 0 {
+		t.Fatalf("dashboard is missing mobile navigation")
+	}
+	mobileEnd := strings.Index(body[mobileStart:], `</nav>`)
+	if mobileEnd < 0 {
+		t.Fatalf("dashboard mobile navigation is not closed")
+	}
+	mobileNav := body[mobileStart : mobileStart+mobileEnd]
+	if count := strings.Count(mobileNav, `data-nav-view=`); count != 5 {
+		t.Fatalf("mobile navigation should have 5 entries, got %d", count)
+	}
+	if count := strings.Count(body, `class="more-nav-item"`); count != 3 {
+		t.Fatalf("more view should have 3 entries, got %d", count)
+	}
+	for _, legacyHash := range []string{"#api-addresses-section", "#users-section", "#providers-section", "#mappings-section", "#keys-section", "#logs-section"} {
+		if strings.Contains(body, `href="`+legacyHash+`"`) {
+			t.Fatalf("dashboard should render canonical hash instead of %q", legacyHash)
+		}
 	}
 	for _, unexpected := range []string{`data-chat-root`, `admin-chat-section`, `chat/app.js`} {
 		if strings.Contains(body, unexpected) {
@@ -782,6 +812,81 @@ func TestModelTokenDetailsAPI(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated details should be rejected, got %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestProviderModelPricesAPI(t *testing.T) {
+	handler, router := testAdmin(t)
+	loginRecorder := httptest.NewRecorder()
+	if err := handler.sessions.Create(loginRecorder, 1, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	var cookies []*http.Cookie
+	var csrf string
+	for _, cookie := range loginRecorder.Result().Cookies() {
+		if cookie.Name == auth.SessionCookie || cookie.Name == auth.CSRFCookie {
+			cookies = append(cookies, cookie)
+		}
+		if cookie.Name == auth.CSRFCookie {
+			csrf = cookie.Value
+		}
+	}
+	provider, err := handler.store.CreateProvider(context.Background(), store.ProviderInput{Name: "priced", Protocol: "openai", BaseAPI: "https://api.example/v1", APIKeyCipher: "cipher", DefaultModel: "model-a", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"provider_id":` + strconv.FormatInt(provider.ID, 10) + `,"items":[{"model":"model-a","input_price_usd_per_million":2,"output_price_usd_per_million":8,"cache_read_price_usd_per_million":0.5,"cache_creation_price_usd_per_million":2}]}`
+	req := httptest.NewRequest(http.MethodPut, "/admin/api/provider-model-prices", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("update without csrf should be rejected: %d %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/admin/api/provider-model-prices", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected price update status: %d %s", rec.Code, rec.Body.String())
+	}
+	var prices []store.ProviderModelPrice
+	if err := json.Unmarshal(rec.Body.Bytes(), &prices); err != nil {
+		t.Fatal(err)
+	}
+	if len(prices) != 1 || prices[0].InputPriceMicroUSDPerMillion != 2_000_000 || prices[0].CacheReadPriceUSDPerMillion != 0.5 {
+		t.Fatalf("unexpected prices response: %#v", prices)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/provider-model-prices?provider_id="+strconv.FormatInt(provider.ID, 10), nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"model":"model-a"`) {
+		t.Fatalf("unexpected price get response: %d %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPut, "/admin/api/provider-model-prices", strings.NewReader(`{"provider_id":`+strconv.FormatInt(provider.ID, 10)+`,"items":[{"model":"bad","input_price_usd_per_million":-1}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "non-negative") {
+		t.Fatalf("negative price should be rejected: %d %s", rec.Code, rec.Body.String())
 	}
 }
 

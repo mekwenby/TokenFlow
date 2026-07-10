@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"html/template"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -55,6 +56,19 @@ type mappingPayload struct {
 	ClientModel   string `json:"client_model"`
 	ProviderID    int64  `json:"provider_id"`
 	UpstreamModel string `json:"upstream_model"`
+}
+
+type providerModelPricesPayload struct {
+	ProviderID int64                     `json:"provider_id"`
+	Items      []providerModelPriceInput `json:"items"`
+}
+
+type providerModelPriceInput struct {
+	Model                           string  `json:"model"`
+	InputPriceUSDPerMillion         float64 `json:"input_price_usd_per_million"`
+	OutputPriceUSDPerMillion        float64 `json:"output_price_usd_per_million"`
+	CacheReadPriceUSDPerMillion     float64 `json:"cache_read_price_usd_per_million"`
+	CacheCreationPriceUSDPerMillion float64 `json:"cache_creation_price_usd_per_million"`
 }
 
 type keyPayload struct {
@@ -119,6 +133,8 @@ func (h *Handler) Register(r chi.Router) {
 		r.Post("/admin/api/model-mappings", h.mappings)
 		r.Put("/admin/api/model-mappings", h.mappings)
 		r.Delete("/admin/api/model-mappings", h.mappings)
+		r.Get("/admin/api/provider-model-prices", h.providerModelPrices)
+		r.Put("/admin/api/provider-model-prices", h.providerModelPrices)
 		r.Get("/admin/api/keys", h.keys)
 		r.Post("/admin/api/keys", h.keys)
 		r.Put("/admin/api/keys", h.keys)
@@ -338,6 +354,69 @@ func (h *Handler) mappings(w http.ResponseWriter, r *http.Request) {
 		id := idParam(r)
 		h.writeResult(w, r, map[string]bool{"ok": true}, h.store.DeleteMapping(r.Context(), id))
 	}
+}
+
+func (h *Handler) providerModelPrices(w http.ResponseWriter, r *http.Request) {
+	if !h.requireCSRFForWrite(w, r) {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		providerID, _ := strconv.ParseInt(r.URL.Query().Get("provider_id"), 10, 64)
+		if providerID <= 0 {
+			providerID = idParam(r)
+		}
+		if providerID <= 0 {
+			h.writeLocalizedError(w, r, http.StatusBadRequest, "detail_id_required")
+			return
+		}
+		prices, err := h.store.ProviderModelPrices(r.Context(), providerID)
+		h.writeResult(w, r, prices, err)
+	case http.MethodPut:
+		var payload providerModelPricesPayload
+		if !h.decodePayload(w, r, &payload) {
+			return
+		}
+		if payload.ProviderID <= 0 {
+			h.writeLocalizedError(w, r, http.StatusBadRequest, "detail_id_required")
+			return
+		}
+		items := make([]store.ProviderModelPrice, 0, len(payload.Items))
+		for _, input := range payload.Items {
+			item, ok := providerModelPriceFromInput(w, r, input)
+			if !ok {
+				return
+			}
+			items = append(items, item)
+		}
+		prices, err := h.store.UpdateProviderModelPrices(r.Context(), payload.ProviderID, items)
+		if errors.Is(err, store.ErrInvalidPrice) {
+			h.writeLocalizedError(w, r, http.StatusBadRequest, "invalid_price")
+			return
+		}
+		h.writeResult(w, r, prices, err)
+	}
+}
+
+func providerModelPriceFromInput(w http.ResponseWriter, r *http.Request, input providerModelPriceInput) (store.ProviderModelPrice, bool) {
+	if input.InputPriceUSDPerMillion < 0 || input.OutputPriceUSDPerMillion < 0 || input.CacheReadPriceUSDPerMillion < 0 || input.CacheCreationPriceUSDPerMillion < 0 {
+		writeError(w, http.StatusBadRequest, tr(languageFromRequest(r), "invalid_price"))
+		return store.ProviderModelPrice{}, false
+	}
+	return store.ProviderModelPrice{
+		Model:                                strings.TrimSpace(input.Model),
+		InputPriceMicroUSDPerMillion:         usdPerMillionToMicroUSD(input.InputPriceUSDPerMillion),
+		OutputPriceMicroUSDPerMillion:        usdPerMillionToMicroUSD(input.OutputPriceUSDPerMillion),
+		CacheReadPriceMicroUSDPerMillion:     usdPerMillionToMicroUSD(input.CacheReadPriceUSDPerMillion),
+		CacheCreationPriceMicroUSDPerMillion: usdPerMillionToMicroUSD(input.CacheCreationPriceUSDPerMillion),
+	}, true
+}
+
+func usdPerMillionToMicroUSD(value float64) int64 {
+	if value <= 0 {
+		return 0
+	}
+	return int64(math.Round(value * 1_000_000))
 }
 
 func (h *Handler) keys(w http.ResponseWriter, r *http.Request) {
@@ -680,17 +759,17 @@ const templates = `
     </div>
   </header>
   <div class="app-shell">
-    <aside class="side-nav" aria-label="Admin sections">
-      <a class="nav-item active" href="#overview" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-overview"></use></svg><span>{{tr .Lang "overview"}}</span></a>
-      <a class="nav-item" href="#api-addresses-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-link"></use></svg><span>{{tr .Lang "api_addresses"}}</span></a>
-      <a class="nav-item" href="#users-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-users"></use></svg><span>{{tr .Lang "users"}}</span></a>
-      <a class="nav-item" href="#providers-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-server"></use></svg><span>{{tr .Lang "providers"}}</span></a>
-      <a class="nav-item" href="#mappings-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-route"></use></svg><span>{{tr .Lang "model_mappings"}}</span></a>
-      <a class="nav-item" href="#keys-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-key"></use></svg><span>{{tr .Lang "distribution_keys"}}</span></a>
-      <a class="nav-item" href="#logs-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-list"></use></svg><span>{{tr .Lang "recent_requests"}}</span></a>
+    <aside class="side-nav" aria-label="{{tr .Lang "admin_navigation"}}">
+      <a class="nav-item active" href="#overview" data-nav-view="overview"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-overview"></use></svg><span>{{tr .Lang "overview"}}</span></a>
+      <a class="nav-item" href="#api-addresses" data-nav-view="api-addresses"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-link"></use></svg><span>{{tr .Lang "api_addresses"}}</span></a>
+      <a class="nav-item" href="#users" data-nav-view="users"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-users"></use></svg><span>{{tr .Lang "users"}}</span></a>
+      <a class="nav-item" href="#providers" data-nav-view="providers"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-server"></use></svg><span>{{tr .Lang "providers"}}</span></a>
+      <a class="nav-item" href="#mappings" data-nav-view="mappings"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-route"></use></svg><span>{{tr .Lang "model_mappings"}}</span></a>
+      <a class="nav-item" href="#keys" data-nav-view="keys"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-key"></use></svg><span>{{tr .Lang "distribution_keys"}}</span></a>
+      <a class="nav-item" href="#logs" data-nav-view="logs"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-list"></use></svg><span>{{tr .Lang "recent_requests"}}</span></a>
     </aside>
   <main class="layout">
-    <section id="overview" class="panel stats-panel">
+    <section id="overview" class="panel stats-panel" data-admin-view="overview">
       <h2>{{tr .Lang "overview"}}</h2>
       <div id="stats" class="stats-grid"></div>
       <div class="usage-section">
@@ -704,11 +783,11 @@ const templates = `
         <div id="token-usage" class="usage-chart"></div>
       </div>
     </section>
-    <section id="api-addresses-section" class="panel">
+    <section id="api-addresses-section" class="panel" data-admin-view="api-addresses" hidden>
       <h2>{{tr .Lang "api_addresses"}}</h2>
       <div id="api-addresses" class="api-grid"></div>
     </section>
-    <section id="users-section" class="panel">
+    <section id="users-section" class="panel" data-admin-view="users" hidden>
       <div class="section-head">
         <h2>{{tr .Lang "users"}}</h2>
       </div>
@@ -720,7 +799,7 @@ const templates = `
       </form>
       <div id="users" class="table-wrap"></div>
     </section>
-    <section id="providers-section" class="panel">
+    <section id="providers-section" class="panel" data-admin-view="providers" hidden>
       <div class="section-head">
         <h2>{{tr .Lang "providers"}}</h2>
         <button type="button" class="icon-label" data-action="open" data-id="provider-form">
@@ -740,9 +819,15 @@ const templates = `
         <label class="check"><input name="is_default" type="checkbox"> {{tr .Lang "default"}}</label>
         <div class="row-actions"><button type="submit">{{tr .Lang "save"}}</button><button type="button" class="secondary" data-action="cancel">{{tr .Lang "cancel"}}</button></div>
       </form>
+      <form id="provider-prices-form" class="editor hidden">
+        <input type="hidden" name="provider_id">
+        <h3>{{tr .Lang "model_prices"}}</h3>
+        <div id="provider-prices-editor" class="table-wrap"></div>
+        <div class="row-actions"><button type="submit">{{tr .Lang "save"}}</button><button type="button" class="secondary" data-action="cancel">{{tr .Lang "cancel"}}</button></div>
+      </form>
       <div id="providers" class="table-wrap"></div>
     </section>
-    <section id="mappings-section" class="panel">
+    <section id="mappings-section" class="panel" data-admin-view="mappings" hidden>
       <div class="section-head">
         <h2>{{tr .Lang "model_mappings"}}</h2>
         <button type="button" class="icon-label" data-action="open" data-id="mapping-form">
@@ -759,13 +844,18 @@ const templates = `
       </form>
       <div id="mappings" class="table-wrap"></div>
     </section>
-    <section id="keys-section" class="panel">
+    <section id="keys-section" class="panel" data-admin-view="keys" hidden>
       <div class="section-head">
         <h2>{{tr .Lang "distribution_keys"}}</h2>
-        <button type="button" class="icon-label" data-action="open" data-id="key-form">
-          <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-add"></use></svg>
-          <span>{{tr .Lang "create_key"}}</span>
-        </button>
+        <div class="section-actions">
+          <button type="button" class="icon-label" data-action="open" data-id="key-form">
+            <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-add"></use></svg>
+            <span>{{tr .Lang "create_key"}}</span>
+          </button>
+          <button type="button" id="keys-fullscreen-toggle" class="secondary action-icon" data-action="toggle-keys-fullscreen" title="{{tr .Lang "fullscreen"}}" aria-label="{{tr .Lang "fullscreen"}}" aria-pressed="false">
+            <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-fullscreen"></use></svg>
+          </button>
+        </div>
       </div>
       <form id="key-form" class="editor hidden">
         <input type="hidden" name="id">
@@ -776,32 +866,55 @@ const templates = `
       <p id="new-key" class="secret hidden"></p>
       <div id="keys" class="table-wrap"></div>
     </section>
-    <section id="logs-section" class="panel">
+    <section id="logs-section" class="panel" data-admin-view="logs" hidden>
       <div class="section-head logs-head">
         <h2>{{tr .Lang "recent_requests"}}</h2>
-        <form id="logs-search-form" class="logs-search">
-          <input name="q" type="search" placeholder="{{tr .Lang "logs_search_placeholder"}}" aria-label="{{tr .Lang "logs_search"}}">
-          <button type="submit" class="action-icon" title="{{tr .Lang "logs_search"}}" aria-label="{{tr .Lang "logs_search"}}">
-            <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-search"></use></svg>
+        <div class="logs-tools">
+          <form id="logs-search-form" class="logs-search">
+            <input name="q" type="search" placeholder="{{tr .Lang "logs_search_placeholder"}}" aria-label="{{tr .Lang "logs_search"}}">
+            <button type="submit" class="action-icon" title="{{tr .Lang "logs_search"}}" aria-label="{{tr .Lang "logs_search"}}">
+              <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-search"></use></svg>
+            </button>
+            <button type="button" class="secondary action-icon" data-action="clear-logs-search" title="{{tr .Lang "clear"}}" aria-label="{{tr .Lang "clear"}}">
+              <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-close"></use></svg>
+            </button>
+          </form>
+          <button type="button" id="logs-fullscreen-toggle" class="secondary action-icon" data-action="toggle-logs-fullscreen" title="{{tr .Lang "fullscreen"}}" aria-label="{{tr .Lang "fullscreen"}}" aria-pressed="false">
+            <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-fullscreen"></use></svg>
           </button>
-          <button type="button" class="secondary action-icon" data-action="clear-logs-search" title="{{tr .Lang "clear"}}" aria-label="{{tr .Lang "clear"}}">
-            <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-close"></use></svg>
-          </button>
-        </form>
+        </div>
       </div>
       <div id="logs" class="table-wrap"></div>
       <div id="logs-pager"></div>
     </section>
+    <section id="more-section" class="panel more-view" data-admin-view="more" hidden>
+      <h2>{{tr .Lang "more"}}</h2>
+      <nav class="more-nav-list" aria-label="{{tr .Lang "more_navigation"}}">
+        <a class="more-nav-item" href="#api-addresses">
+          <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-link"></use></svg>
+          <span>{{tr .Lang "api_addresses"}}</span>
+          <svg class="icon more-nav-chevron" aria-hidden="true"><use href="/admin/static/icons.svg#icon-chevron-right"></use></svg>
+        </a>
+        <a class="more-nav-item" href="#mappings">
+          <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-route"></use></svg>
+          <span>{{tr .Lang "model_mappings"}}</span>
+          <svg class="icon more-nav-chevron" aria-hidden="true"><use href="/admin/static/icons.svg#icon-chevron-right"></use></svg>
+        </a>
+        <a class="more-nav-item" href="#keys">
+          <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-key"></use></svg>
+          <span>{{tr .Lang "distribution_keys"}}</span>
+          <svg class="icon more-nav-chevron" aria-hidden="true"><use href="/admin/static/icons.svg#icon-chevron-right"></use></svg>
+        </a>
+      </nav>
+    </section>
   </main>
   </div>
-  <nav class="mobile-nav" aria-label="Admin sections">
-    <a class="nav-item active" href="#overview" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-overview"></use></svg><span>{{tr .Lang "overview"}}</span></a>
-    <a class="nav-item" href="#api-addresses-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-link"></use></svg><span>{{tr .Lang "api_addresses"}}</span></a>
-    <a class="nav-item" href="#users-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-users"></use></svg><span>{{tr .Lang "users"}}</span></a>
-    <a class="nav-item" href="#providers-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-server"></use></svg><span>{{tr .Lang "providers"}}</span></a>
-    <a class="nav-item" href="#mappings-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-route"></use></svg><span>{{tr .Lang "model_mappings"}}</span></a>
-    <a class="nav-item" href="#keys-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-key"></use></svg><span>{{tr .Lang "distribution_keys"}}</span></a>
-    <a class="nav-item" href="#logs-section" data-nav-link><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-list"></use></svg><span>{{tr .Lang "recent_requests"}}</span></a>
+  <nav class="mobile-nav" aria-label="{{tr .Lang "admin_navigation"}}">
+    <a class="nav-item active" href="#overview" data-nav-view="overview"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-overview"></use></svg><span>{{tr .Lang "overview"}}</span></a>
+    <a class="nav-item" href="#users" data-nav-view="users"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-users"></use></svg><span>{{tr .Lang "users"}}</span></a>
+    <a class="nav-item" href="#providers" data-nav-view="providers"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-server"></use></svg><span>{{tr .Lang "providers"}}</span></a>
+    <a class="nav-item" href="#logs" data-nav-view="logs"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-list"></use></svg><span>{{tr .Lang "recent_requests"}}</span></a>
+    <a class="nav-item" href="#more" data-nav-view="more" data-nav-active-for="api-addresses mappings keys more"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-more"></use></svg><span>{{tr .Lang "more"}}</span></a>
   </nav>
   <div id="detail-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="detail-modal-title">
     <div class="modal-dialog">
