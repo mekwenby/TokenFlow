@@ -1,0 +1,47 @@
+{
+  "id": "/admin/chat",
+  "name": "TokenFlow Admin",
+  "short_name": "TokenFlow Admin",
+  "description": "TokenFlow administration and LLM Chat.",
+  "start_url": "/admin/chat",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#101820",
+  "background_color": "#101820",
+  "categories": ["productivity", "utilities"],
+  "icons": [
+    {
+      "src": "/admin/static/pwa/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/admin/static/pwa/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/admin/static/pwa/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Admin Chat",
+      "short_name": "Chat",
+      "url": "/admin/chat",
+      "icons": [{"src": "/admin/static/pwa/icon-192.png", "sizes": "192x192", "type": "image/png"}]
+    },
+    {
+      "name": "Admin Dashboard",
+      "short_name": "Admin",
+      "url": "/admin",
+      "icons": [{"src": "/admin/static/pwa/icon-192.png", "sizes": "192x192", "type": "image/png"}]
+    }
+  ]
+}

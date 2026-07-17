@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/crypto/bcrypt"
@@ -30,13 +29,14 @@ type Handler struct {
 }
 
 type pageData struct {
-	Title    string
-	Username string
-	Error    string
-	Lang     string
-	LangJSON template.JS
-	I18NJSON template.JS
-	Path     string
+	Title     string
+	Username  string
+	CSRFToken string
+	Error     string
+	Lang      string
+	LangJSON  template.JS
+	I18NJSON  template.JS
+	Path      string
 }
 
 type providerPayload struct {
@@ -100,7 +100,7 @@ func New(st *store.Store, box *secret.Box) *Handler {
 	return &Handler{
 		store:    st,
 		box:      box,
-		sessions: auth.NewSessions(12 * time.Hour),
+		sessions: auth.NewSessions(st),
 		tpl: template.Must(template.New("admin").Funcs(template.FuncMap{
 			"tr":         tr,
 			"i18nJSON":   i18nJSON,
@@ -119,10 +119,10 @@ func (h *Handler) Register(r chi.Router) {
 	r.Post("/admin/setup", h.setupPost)
 	r.Get("/admin/login", h.loginForm)
 	r.Post("/admin/login", h.loginPost)
-	r.Post("/admin/logout", h.logout)
 	r.Post("/admin/lang", h.languagePost)
 	r.Group(func(r chi.Router) {
 		r.Use(h.requireSession)
+		r.Post("/admin/logout", h.logout)
 		r.Get("/admin", h.dashboard)
 		r.Get("/admin/chat", h.chatPage)
 		r.Get("/admin/api/providers", h.providers)
@@ -159,14 +159,14 @@ func (h *Handler) Register(r chi.Router) {
 }
 
 func (h *Handler) dashboard(w http.ResponseWriter, r *http.Request) {
-	session, _ := h.sessions.Get(r)
+	session, _ := auth.SessionFromRequest(r)
 	data := h.page(r, "title.dashboard")
 	data.Username = session.Username
 	_ = h.tpl.ExecuteTemplate(w, "dashboard", data)
 }
 
 func (h *Handler) chatPage(w http.ResponseWriter, r *http.Request) {
-	session, _ := h.sessions.Get(r)
+	session, _ := auth.SessionFromRequest(r)
 	data := h.page(r, "title.dashboard")
 	data.Title = "LLM Chat"
 	data.Username = session.Username
@@ -206,7 +206,10 @@ func (h *Handler) setupPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user, _ := h.store.AdminByUsername(r.Context(), username)
-	_ = h.sessions.Create(w, user.ID, user.Username)
+	if err := h.sessions.Create(w, r, user.ID); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
 
@@ -232,7 +235,7 @@ func (h *Handler) loginPost(w http.ResponseWriter, r *http.Request) {
 		_ = h.tpl.ExecuteTemplate(w, "login", data)
 		return
 	}
-	if err := h.sessions.Create(w, user.ID, user.Username); err != nil {
+	if err := h.sessions.Create(w, r, user.ID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -240,7 +243,13 @@ func (h *Handler) loginPost(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
-	h.sessions.Clear(w, r)
+	if !h.requireCSRFForWrite(w, r) {
+		return
+	}
+	if err := h.sessions.RevokeAll(w, r); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 }
 
@@ -549,7 +558,7 @@ func (h *Handler) logs(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) chatOwner(r *http.Request) (store.ChatOwner, bool) {
-	session, ok := h.sessions.Get(r)
+	session, ok := auth.SessionFromRequest(r)
 	if !ok {
 		return store.ChatOwner{}, false
 	}
@@ -562,7 +571,8 @@ func (h *Handler) requireSession(next http.Handler) http.Handler {
 			http.Redirect(w, r, "/admin/setup", http.StatusSeeOther)
 			return
 		}
-		if _, ok := h.sessions.Get(r); !ok {
+		session, err := h.sessions.Authenticate(w, r)
+		if errors.Is(err, auth.ErrSessionNotFound) {
 			if strings.HasPrefix(r.URL.Path, "/admin/api/") {
 				h.writeLocalizedError(w, r, http.StatusUnauthorized, "login_required")
 			} else {
@@ -570,7 +580,11 @@ func (h *Handler) requireSession(next http.Handler) http.Handler {
 			}
 			return
 		}
-		next.ServeHTTP(w, r)
+		if err != nil {
+			http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			return
+		}
+		next.ServeHTTP(w, auth.WithSession(r, session))
 	})
 }
 
@@ -578,7 +592,7 @@ func (h *Handler) requireCSRFForWrite(w http.ResponseWriter, r *http.Request) bo
 	if r.Method == http.MethodGet {
 		return true
 	}
-	if auth.ValidateCSRF(r) {
+	if h.sessions.ValidateCSRF(r) {
 		return true
 	}
 	h.writeLocalizedError(w, r, http.StatusForbidden, "csrf_invalid")
@@ -603,12 +617,19 @@ func sanitizeProvider(provider store.Provider) store.Provider {
 
 func (h *Handler) page(r *http.Request, titleKey string) pageData {
 	lang := languageFromRequest(r)
+	csrf := ""
+	if session, ok := auth.SessionFromRequest(r); ok {
+		csrf = session.CSRFToken
+	} else if cookie, err := r.Cookie(auth.CSRFCookie); err == nil {
+		csrf = cookie.Value
+	}
 	return pageData{
-		Title:    tr(lang, titleKey),
-		Lang:     lang,
-		LangJSON: jsonString(lang),
-		I18NJSON: i18nJSON(lang),
-		Path:     safeAdminNext(r.URL.RequestURI()),
+		Title:     tr(lang, titleKey),
+		CSRFToken: csrf,
+		Lang:      lang,
+		LangJSON:  jsonString(lang),
+		I18NJSON:  i18nJSON(lang),
+		Path:      safeAdminNext(r.URL.RequestURI()),
 	}
 }
 
@@ -660,6 +681,13 @@ func normalizeLogsParams(limit, offset int) (int, int) {
 }
 
 const templates = `
+{{define "admin_pwa_head"}}
+  <meta name="theme-color" content="#101820">
+  <link rel="manifest" href="/admin/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/admin/static/pwa/icon-192.png">
+  <script src="/admin/static/pwa/register.js" defer></script>
+{{end}}
+
 {{define "lang_switch"}}
 <form class="lang-switch" method="post" action="/admin/lang">
   <input type="hidden" name="next" value="{{.Path}}">
@@ -677,6 +705,7 @@ const templates = `
 <!doctype html>
 <html lang="{{.Lang}}">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><link rel="icon" href="/admin/static/tokenflow-logo.svg"><link rel="stylesheet" href="/admin/static/css/tokens.css">
+  {{template "admin_pwa_head" .}}
   <link rel="stylesheet" href="/admin/static/css/base.css">
   <link rel="stylesheet" href="/admin/static/css/components.css">
   <link rel="stylesheet" href="/admin/static/css/charts.css">
@@ -703,6 +732,7 @@ const templates = `
 <!doctype html>
 <html lang="{{.Lang}}">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><link rel="icon" href="/admin/static/tokenflow-logo.svg"><link rel="stylesheet" href="/admin/static/css/tokens.css">
+  {{template "admin_pwa_head" .}}
   <link rel="stylesheet" href="/admin/static/css/base.css">
   <link rel="stylesheet" href="/admin/static/css/components.css">
   <link rel="stylesheet" href="/admin/static/css/charts.css">
@@ -734,6 +764,7 @@ const templates = `
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.Title}}</title>
   <link rel="icon" href="/admin/static/tokenflow-logo.svg">
+  {{template "admin_pwa_head" .}}
   <link rel="stylesheet" href="/admin/static/css/tokens.css">
   <link rel="stylesheet" href="/admin/static/css/base.css">
   <link rel="stylesheet" href="/admin/static/css/components.css">
@@ -746,10 +777,10 @@ const templates = `
     <div class="topbar-inner">
       <h1 class="brand"><img src="/admin/static/tokenflow-logo.svg" alt="" aria-hidden="true"><span>{{tr .Lang "app.title"}}</span></h1>
       <div class="top-actions">
-        <a class="button-link secondary icon-label" href="/admin/chat"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-list"></use></svg><span>LLM Chat</span></a>
         {{template "lang_switch" .}}
         <span class="user-chip" title="{{.Username}}">{{.Username}}</span>
         <form method="post" action="/admin/logout">
+          <input type="hidden" name="csrf" value="{{.CSRFToken}}">
           <button type="submit" class="secondary icon-label">
             <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-log-out"></use></svg>
             <span>{{tr .Lang "logout"}}</span>
@@ -760,6 +791,7 @@ const templates = `
   </header>
   <div class="app-shell">
     <aside class="side-nav" aria-label="{{tr .Lang "admin_navigation"}}">
+      <a class="nav-item" href="/admin/chat"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-chat"></use></svg><span>LLM Chat</span></a>
       <a class="nav-item active" href="#overview" data-nav-view="overview"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-overview"></use></svg><span>{{tr .Lang "overview"}}</span></a>
       <a class="nav-item" href="#api-addresses" data-nav-view="api-addresses"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-link"></use></svg><span>{{tr .Lang "api_addresses"}}</span></a>
       <a class="nav-item" href="#users" data-nav-view="users"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-users"></use></svg><span>{{tr .Lang "users"}}</span></a>
@@ -905,16 +937,21 @@ const templates = `
           <span>{{tr .Lang "distribution_keys"}}</span>
           <svg class="icon more-nav-chevron" aria-hidden="true"><use href="/admin/static/icons.svg#icon-chevron-right"></use></svg>
         </a>
+        <a class="more-nav-item" href="#logs">
+          <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-list"></use></svg>
+          <span>{{tr .Lang "recent_requests"}}</span>
+          <svg class="icon more-nav-chevron" aria-hidden="true"><use href="/admin/static/icons.svg#icon-chevron-right"></use></svg>
+        </a>
       </nav>
     </section>
   </main>
   </div>
   <nav class="mobile-nav" aria-label="{{tr .Lang "admin_navigation"}}">
+    <a class="nav-item" href="/admin/chat"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-chat"></use></svg><span>LLM Chat</span></a>
     <a class="nav-item active" href="#overview" data-nav-view="overview"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-overview"></use></svg><span>{{tr .Lang "overview"}}</span></a>
     <a class="nav-item" href="#users" data-nav-view="users"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-users"></use></svg><span>{{tr .Lang "users"}}</span></a>
     <a class="nav-item" href="#providers" data-nav-view="providers"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-server"></use></svg><span>{{tr .Lang "providers"}}</span></a>
-    <a class="nav-item" href="#logs" data-nav-view="logs"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-list"></use></svg><span>{{tr .Lang "recent_requests"}}</span></a>
-    <a class="nav-item" href="#more" data-nav-view="more" data-nav-active-for="api-addresses mappings keys more"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-more"></use></svg><span>{{tr .Lang "more"}}</span></a>
+    <a class="nav-item" href="#more" data-nav-view="more" data-nav-active-for="api-addresses mappings keys logs more"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-more"></use></svg><span>{{tr .Lang "more"}}</span></a>
   </nav>
   <div id="detail-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="detail-modal-title">
     <div class="modal-dialog">
@@ -945,88 +982,84 @@ const templates = `
 <html lang="{{.Lang}}">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>{{.Title}}</title>
   <link rel="icon" href="/admin/static/tokenflow-logo.svg">
+  {{template "admin_pwa_head" .}}
   <link rel="stylesheet" href="/admin/static/css/tokens.css">
   <link rel="stylesheet" href="/admin/static/css/base.css">
   <link rel="stylesheet" href="/admin/static/css/components.css">
   <link rel="stylesheet" href="/admin/static/css/layout.css">
+  <link rel="stylesheet" href="/admin/static/css/chat.css">
   <script src="/admin/static/theme.js"></script>
 </head>
 <body class="admin-page chat-page">
-  <header class="topbar">
-    <div class="topbar-inner">
-      <h1 class="brand"><img src="/admin/static/tokenflow-logo.svg" alt="" aria-hidden="true"><span>LLM Chat</span></h1>
-      <div class="top-actions">
-        <a class="button-link secondary icon-label" href="/admin"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-overview"></use></svg><span>{{tr .Lang "overview"}}</span></a>
-        {{template "lang_switch" .}}
-        <span class="user-chip" title="{{.Username}}">{{.Username}}</span>
-        <form method="post" action="/admin/logout">
-          <button type="submit" class="secondary icon-label">
-            <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-log-out"></use></svg>
-            <span>{{tr .Lang "logout"}}</span>
-          </button>
-        </form>
-      </div>
-    </div>
-  </header>
-  <main class="chat-app" data-chat-root data-chat-lang="{{.Lang}}" data-chat-api-prefix="/admin/api/chat" data-chat-csrf-cookie="gateway_csrf" data-chat-settings-writable="true">
-    <aside class="chat-app-sidebar" aria-label="Conversations">
+  <main class="chat-app" data-chat-root data-chat-ready="false" data-chat-lang="{{.Lang}}" data-chat-api-prefix="/admin/api/chat" data-chat-csrf-cookie="gateway_csrf" data-chat-settings-writable="true">
+    <button type="button" class="chat-sidebar-backdrop" data-chat-sidebar-backdrop aria-label="Close conversations"></button>
+    <aside class="chat-app-sidebar" data-chat-sidebar aria-label="Conversations">
       <div class="chat-sidebar-head">
-        <div>
-          <strong>TokenFlow</strong>
-          <span>LLM Chat</span>
+        <a class="chat-sidebar-brand" href="/admin/chat"><img src="/admin/static/tokenflow-logo.svg" alt=""><span>{{tr .Lang "app.title"}}</span></a>
+        <div class="chat-sidebar-head-actions">
+          <button type="button" class="chat-icon-button" data-chat-new title="New chat" aria-label="New chat"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-add"></use></svg></button>
+          <button type="button" class="chat-icon-button" data-chat-sidebar-collapse title="Collapse sidebar" aria-label="Collapse sidebar"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-panel-left-close"></use></svg></button>
         </div>
-        <button type="button" class="action-icon" data-chat-new title="New chat" aria-label="New chat"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-add"></use></svg></button>
       </div>
+      <label class="chat-conversation-search">
+        <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-search"></use></svg>
+        <input type="search" data-chat-conversation-search placeholder="Search conversations" autocomplete="off">
+      </label>
       <div class="chat-list" data-chat-conversations></div>
       <div class="chat-sidebar-foot">
-        <button type="button" class="chat-settings-button" data-chat-settings-open title="Chat settings" aria-label="Chat settings"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-settings"></use></svg><span>Settings</span></button>
+        <button type="button" class="chat-account-button" data-chat-account-toggle aria-expanded="false">
+          <span class="chat-account-avatar" aria-hidden="true">{{.Username}}</span>
+          <span class="chat-account-name">{{.Username}}</span>
+          <svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-more"></use></svg>
+        </button>
+        <div class="chat-popover chat-account-menu hidden" data-chat-account-menu>
+          <a href="/admin"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-overview"></use></svg><span>{{tr .Lang "overview"}}</span></a>
+          {{template "lang_switch" .}}
+          <form method="post" action="/admin/logout"><input type="hidden" name="csrf" value="{{.CSRFToken}}"><button type="submit"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-log-out"></use></svg><span>{{tr .Lang "logout"}}</span></button></form>
+        </div>
       </div>
     </aside>
     <section class="chat-app-main" aria-label="LLM Chat">
-      <div class="chat-app-toolbar">
-        <button type="button" class="chat-settings-summary" data-chat-settings-open title="Chat settings" aria-label="Chat settings">
-          <span>Settings</span>
-          <strong data-chat-settings-summary>Model loading - Medium</strong>
-        </button>
-        <div class="chat-tool-toggles" aria-label="Tool controls">
-          <label class="check"><input type="checkbox" data-chat-search checked> Search</label>
-          <label class="check"><input type="checkbox" data-chat-read checked> Read web</label>
-          <label class="check"><input type="checkbox" data-chat-process checked> Process</label>
-          <button type="button" class="secondary icon-label chat-process-reopen hidden" data-chat-process-reopen title="Show process panel" aria-label="Show process panel"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-chevron-left"></use></svg><span>Process</span></button>
+      <header class="chat-main-header">
+        <button type="button" class="chat-icon-button" data-chat-sidebar-toggle aria-expanded="true" title="Show conversations" aria-label="Show conversations"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-panel-left"></use></svg></button>
+        <div class="chat-header-title">
+          <h1 data-chat-title>New chat</h1>
+          <button type="button" class="chat-settings-summary" data-chat-settings-open title="Chat settings" aria-label="Chat settings"><span data-chat-settings-summary>Model loading - Medium</span><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-chevron-down"></use></svg></button>
         </div>
-        <div class="chat-manage-actions">
-          <button type="button" class="secondary action-icon" data-chat-auto-title title="Generate title" aria-label="Generate title"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-refresh"></use></svg></button>
-          <button type="button" class="secondary action-icon" data-chat-rename title="Rename" aria-label="Rename"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-edit"></use></svg></button>
-          <button type="button" class="secondary action-icon" data-chat-delete title="Delete" aria-label="Delete"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-trash"></use></svg></button>
+        <div class="chat-header-menu-wrap">
+          <button type="button" class="chat-icon-button" data-chat-conversation-menu-toggle aria-expanded="false" title="Conversation actions" aria-label="Conversation actions"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-more"></use></svg></button>
+          <div class="chat-popover chat-conversation-menu hidden" data-chat-conversation-menu>
+            <button type="button" data-chat-auto-title><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-refresh"></use></svg><span>Generate title</span></button>
+            <button type="button" data-chat-rename><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-edit"></use></svg><span>Rename</span></button>
+            <button type="button" class="danger-text" data-chat-delete><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-trash"></use></svg><span>Delete</span></button>
+          </div>
         </div>
-      </div>
-      <div class="chat-workspace">
-        <div class="chat-body" data-chat-messages></div>
-        <aside class="chat-process-shell" data-chat-process-shell aria-label="Process timeline">
-          <div class="chat-process-head">
-            <div class="chat-process-title">
-              <strong>Process</strong>
-              <span>Thinking and tools</span>
+      </header>
+      <div class="chat-body" data-chat-messages></div>
+      <button type="button" class="chat-scroll-bottom hidden" data-chat-scroll-bottom title="Scroll to bottom" aria-label="Scroll to bottom"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-arrow-down"></use></svg></button>
+      <div class="chat-composer-shell">
+        <form class="chat-composer" data-chat-form>
+          <textarea data-chat-input rows="1" placeholder="Ask a question..." required></textarea>
+          <div class="chat-composer-bar">
+            <div class="chat-tools-wrap">
+              <button type="button" class="chat-icon-button chat-tools-toggle" data-chat-tools-toggle aria-expanded="false" title="Tools" aria-label="Tools"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-add"></use></svg></button>
+              <div class="chat-popover chat-tools-menu hidden" data-chat-tools-menu>
+                <label><input type="checkbox" data-chat-search checked><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-search"></use></svg><span>Search</span></label>
+                <label><input type="checkbox" data-chat-read checked><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-link"></use></svg><span>Read web</span></label>
+                <label><input type="checkbox" data-chat-process checked><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-list"></use></svg><span>Process</span></label>
+              </div>
+              <div class="chat-tool-status" data-chat-tool-status></div>
             </div>
-            <div class="chat-process-actions">
-              <button type="button" class="secondary action-icon" data-chat-process-top title="Scroll to top" aria-label="Scroll to top"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-arrow-up"></use></svg></button>
-              <button type="button" class="secondary action-icon" data-chat-process-bottom title="Scroll to bottom" aria-label="Scroll to bottom"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-arrow-down"></use></svg></button>
-              <button type="button" class="secondary action-icon" data-chat-process-collapse aria-expanded="true" title="Collapse process" aria-label="Collapse process"><svg class="icon" aria-hidden="true"><use data-chat-process-collapse-icon href="/admin/static/icons.svg#icon-chevron-right"></use></svg></button>
+            <div class="chat-send-actions">
+              <button type="button" class="chat-send-button hidden" data-chat-stop title="Stop" aria-label="Stop"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-stop"></use></svg></button>
+              <button type="submit" class="chat-send-button" data-chat-send title="Send" aria-label="Send"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-arrow-up"></use></svg></button>
             </div>
           </div>
-          <div class="chat-process" data-chat-process-panel></div>
-        </aside>
+        </form>
       </div>
-      <form class="chat-composer" data-chat-form>
-        <textarea data-chat-input rows="1" placeholder="Ask a question..." required></textarea>
-        <div class="chat-actions">
-          <button type="button" class="secondary hidden" data-chat-stop>Stop</button>
-          <button type="submit">Send</button>
-        </div>
-      </form>
       <div class="chat-settings-modal hidden" data-chat-settings-modal aria-hidden="true">
         <div class="chat-settings-backdrop" data-chat-settings-close></div>
         <form class="chat-settings-dialog" data-chat-settings-form role="dialog" aria-modal="true" aria-labelledby="admin-chat-settings-title">
@@ -1038,52 +1071,25 @@ const templates = `
             <button type="button" class="secondary action-icon" data-chat-settings-close title="Close" aria-label="Close settings"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-close"></use></svg></button>
           </div>
           <div class="chat-settings-body">
-            <div class="chat-avatar-settings" aria-label="Avatar settings">
-              <div class="chat-avatar-card">
-                <div class="chat-avatar-card-head">
-                  <span>User avatar</span>
-                  <input data-chat-user-avatar maxlength="16" placeholder="😀" aria-label="User avatar">
-                </div>
-                <div class="chat-avatar-picker" aria-label="User avatar presets">
-                  <button type="button" class="chat-avatar-preset" data-chat-avatar-target="user" data-chat-avatar-value="😀">😀</button>
-                  <button type="button" class="chat-avatar-preset" data-chat-avatar-target="user" data-chat-avatar-value="😎">😎</button>
-                  <button type="button" class="chat-avatar-preset" data-chat-avatar-target="user" data-chat-avatar-value="🧑‍💻">🧑‍💻</button>
-                  <button type="button" class="chat-avatar-preset" data-chat-avatar-target="user" data-chat-avatar-value="🧑‍🚀">🧑‍🚀</button>
-                  <button type="button" class="chat-avatar-preset" data-chat-avatar-target="user" data-chat-avatar-value="✨">✨</button>
-                </div>
-              </div>
-              <div class="chat-avatar-card">
-                <div class="chat-avatar-card-head">
-                  <span>Assistant avatar</span>
-                  <input data-chat-assistant-avatar maxlength="16" placeholder="🤖" aria-label="Assistant avatar">
-                </div>
-                <div class="chat-avatar-picker" aria-label="Assistant avatar presets">
-                  <button type="button" class="chat-avatar-preset" data-chat-avatar-target="assistant" data-chat-avatar-value="🤖">🤖</button>
-                  <button type="button" class="chat-avatar-preset" data-chat-avatar-target="assistant" data-chat-avatar-value="🧠">🧠</button>
-                  <button type="button" class="chat-avatar-preset" data-chat-avatar-target="assistant" data-chat-avatar-value="🛠️">🛠️</button>
-                  <button type="button" class="chat-avatar-preset" data-chat-avatar-target="assistant" data-chat-avatar-value="📚">📚</button>
-                  <button type="button" class="chat-avatar-preset" data-chat-avatar-target="assistant" data-chat-avatar-value="🧭">🧭</button>
-                </div>
-              </div>
-            </div>
-            <label class="chat-model-field">Model<select data-chat-model></select></label>
-            <fieldset class="chat-thinking chat-settings-thinking">
-              <legend>Thinking</legend>
-              <label><input type="radio" name="admin-chat-thinking" value="off">Off</label>
-              <label><input type="radio" name="admin-chat-thinking" value="low">Low</label>
-              <label><input type="radio" name="admin-chat-thinking" value="medium" checked>Medium</label>
-              <label><input type="radio" name="admin-chat-thinking" value="high">High</label>
-            </fieldset>
-            <label class="chat-settings-field chat-max-tools-field">Max tool calls<input data-chat-max-tool-calls type="number" min="0" max="20" step="1" value="6"></label>
-            <section class="chat-default-system-prompt" aria-label="Default system prompt">
-              <div class="chat-default-system-head">
-                <strong data-chat-default-system-title>Default system prompt</strong>
-                <span data-chat-default-system-hint>Always applied by TokenFlow. Your instructions below are appended.</span>
-              </div>
-              <pre data-chat-default-system-prompt></pre>
+            <section class="chat-settings-section">
+              <h3 data-chat-model-section-title>Model and reasoning</h3>
+              <label class="chat-model-field">Model<select data-chat-model></select></label>
+              <fieldset class="chat-thinking chat-settings-thinking"><legend>Thinking</legend><label><input type="radio" name="admin-chat-thinking" value="off">Off</label><label><input type="radio" name="admin-chat-thinking" value="low">Low</label><label><input type="radio" name="admin-chat-thinking" value="medium" checked>Medium</label><label><input type="radio" name="admin-chat-thinking" value="high">High</label></fieldset>
+              <label class="chat-settings-field chat-max-tools-field">Max tool calls<input data-chat-max-tool-calls type="number" min="0" max="20" step="1" value="6"></label>
             </section>
-            <label class="chat-settings-field">System prompt<textarea data-chat-system-prompt maxlength="8000" rows="8" placeholder="Optional instructions for this conversation"></textarea></label>
-            <label class="chat-settings-field">My nickname<input data-chat-nickname maxlength="64" placeholder="Optional display name"></label>
+            <section class="chat-settings-section">
+              <h3 data-chat-instructions-title>Instructions</h3>
+              <details class="chat-default-system-prompt"><summary data-chat-default-system-title>Default system prompt</summary><span data-chat-default-system-hint>Always applied by TokenFlow. Your instructions below are appended.</span><pre data-chat-default-system-prompt></pre></details>
+              <label class="chat-settings-field">System prompt<textarea data-chat-system-prompt maxlength="8000" rows="7" placeholder="Optional instructions for this conversation"></textarea></label>
+            </section>
+            <section class="chat-settings-section">
+              <h3 data-chat-identity-title>Identity</h3>
+              <label class="chat-settings-field">My nickname<input data-chat-nickname maxlength="64" placeholder="Optional display name"></label>
+              <div class="chat-avatar-settings" aria-label="Avatar settings">
+                <div class="chat-avatar-field"><div class="chat-avatar-card-head"><span>User avatar</span><input data-chat-user-avatar maxlength="16" placeholder="😀" aria-label="User avatar"></div><div class="chat-avatar-picker" aria-label="User avatar presets"></div></div>
+                <div class="chat-avatar-field"><div class="chat-avatar-card-head"><span>Assistant avatar</span><input data-chat-assistant-avatar maxlength="16" placeholder="🤖" aria-label="Assistant avatar"></div><div class="chat-avatar-picker" aria-label="Assistant avatar presets"></div></div>
+              </div>
+            </section>
           </div>
           <div class="chat-settings-actions">
             <button type="button" class="secondary" data-chat-settings-cancel>Cancel</button>

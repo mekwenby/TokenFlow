@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -336,6 +337,116 @@ func TestAdminUsageColumnMigration(t *testing.T) {
 	}
 	if admin.RequestCount != 1 || admin.InputTokens != 9 || admin.CacheReadTokens != 4 || admin.OutputTokens != 3 || admin.LastUsedAt == nil {
 		t.Fatalf("migrated admin usage was not updated: %#v", admin)
+	}
+}
+
+func TestAuthSessionMigrationScopingAndRevocation(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "gateway.db")
+	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE admin_users (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		username TEXT NOT NULL UNIQUE,
+		password_hash TEXT NOT NULL,
+		request_count INTEGER NOT NULL DEFAULT 0,
+		input_tokens INTEGER NOT NULL DEFAULT 0,
+		cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+		output_tokens INTEGER NOT NULL DEFAULT 0,
+		last_used_at TEXT,
+		updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE consumer_users (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+		password_hash TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'pending',
+		quota_total_tokens INTEGER NOT NULL DEFAULT 0,
+		quota_used_tokens INTEGER NOT NULL DEFAULT 0,
+		request_count INTEGER NOT NULL DEFAULT 0,
+		input_tokens INTEGER NOT NULL DEFAULT 0,
+		cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+		output_tokens INTEGER NOT NULL DEFAULT 0,
+		last_used_at TEXT,
+		created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO admin_users(username, password_hash) VALUES('admin', 'hash')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO consumer_users(email, password_hash, status) VALUES('user@example.com', 'hash', 'enabled')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Date(2026, time.July, 17, 12, 0, 0, 0, time.UTC)
+	for _, session := range []AuthSession{
+		{OwnerType: AuthSessionOwnerAdmin, UserID: 1, TokenHash: "admin-one", CSRFTokenHash: "csrf-one", CreatedAt: now, ExpiresAt: now.Add(15 * 24 * time.Hour)},
+		{OwnerType: AuthSessionOwnerAdmin, UserID: 1, TokenHash: "admin-two", CSRFTokenHash: "csrf-two", CreatedAt: now, ExpiresAt: now.Add(15 * 24 * time.Hour)},
+		{OwnerType: AuthSessionOwnerConsumer, UserID: 1, TokenHash: "consumer-one", CSRFTokenHash: "csrf-three", CreatedAt: now, ExpiresAt: now.Add(15 * 24 * time.Hour)},
+	} {
+		if err := st.CreateAuthSession(ctx, session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	adminSession, err := st.AuthSessionByTokenHash(ctx, AuthSessionOwnerAdmin, "admin-one")
+	if err != nil || adminSession.Username != "admin" || adminSession.UserStatus != "" {
+		t.Fatalf("unexpected migrated admin session: %#v err=%v", adminSession, err)
+	}
+	consumerSession, err := st.AuthSessionByTokenHash(ctx, AuthSessionOwnerConsumer, "consumer-one")
+	if err != nil || consumerSession.Username != "user@example.com" || consumerSession.UserStatus != ConsumerStatusEnabled {
+		t.Fatalf("unexpected migrated consumer session: %#v err=%v", consumerSession, err)
+	}
+	if err := st.RevokeAuthSessions(ctx, AuthSessionOwnerAdmin, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AuthSessionByTokenHash(ctx, AuthSessionOwnerAdmin, "admin-two"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("all admin sessions should be revoked, got %v", err)
+	}
+	if _, err := st.AuthSessionByTokenHash(ctx, AuthSessionOwnerConsumer, "consumer-one"); err != nil {
+		t.Fatalf("same numeric consumer id must remain scoped: %v", err)
+	}
+	if _, err := st.UpdateConsumerUser(ctx, 1, ConsumerStatusDisabled, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AuthSessionByTokenHash(ctx, AuthSessionOwnerConsumer, "consumer-one"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("disabling a consumer should revoke every session, got %v", err)
+	}
+	if err := st.CreateAuthSession(ctx, AuthSession{
+		OwnerType: AuthSessionOwnerConsumer, UserID: 1, TokenHash: "consumer-cascade", CSRFTokenHash: "csrf-cascade",
+		CreatedAt: now, ExpiresAt: now.Add(15 * 24 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.ExecContext(ctx, `DELETE FROM consumer_users WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AuthSessionByTokenHash(ctx, AuthSessionOwnerConsumer, "consumer-cascade"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleting a consumer should cascade to sessions, got %v", err)
+	}
+
+	for _, index := range []string{"idx_auth_sessions_consumer", "idx_auth_sessions_admin", "idx_auth_sessions_expires_at"} {
+		var count int
+		if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, index).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("missing auth session index %q", index)
+		}
 	}
 }
 
@@ -1093,6 +1204,13 @@ func TestStoreChatConversationOperationLocks(t *testing.T) {
 	if _, err := st.StartChatConversationOperation(ctx, owner, conv.ID, ChatConversationOperationTitleGenerating, "", 5*time.Minute); err != ErrChatConversationBusy {
 		t.Fatalf("same conversation should be busy, got %v", err)
 	}
+	renamed := "blocked"
+	if _, err := st.UpdateChatConversation(ctx, owner, conv.ID, &renamed, nil, nil, nil, nil, nil, nil); err != ErrChatConversationBusy {
+		t.Fatalf("busy conversation update should be rejected, got %v", err)
+	}
+	if err := st.DeleteChatConversation(ctx, owner, conv.ID); err != ErrChatConversationBusy {
+		t.Fatalf("busy conversation delete should be rejected, got %v", err)
+	}
 	if _, err := st.StartChatConversationOperation(ctx, owner, other.ID, ChatConversationOperationTitleGenerating, "", 5*time.Minute); err != nil {
 		t.Fatalf("different conversation should lock independently: %v", err)
 	}
@@ -1114,6 +1232,60 @@ func TestStoreChatConversationOperationLocks(t *testing.T) {
 	if taken.ActiveOperation != ChatConversationOperationTitleGenerating || taken.Status != ChatConversationStatusTitleGenerating {
 		t.Fatalf("expired operation was not taken over: %#v", taken)
 	}
+
+	if _, err := st.db.ExecContext(ctx, `UPDATE chat_conversations SET active_operation = ?, active_operation_started_at = datetime('now', '-10 minutes'), status = ? WHERE id = ?`, ChatConversationOperationResponding, ChatConversationStatusResponding, conv.ID); err != nil {
+		t.Fatal(err)
+	}
+	recovered, didRecover, err := st.RecoverStaleChatConversationOperation(ctx, owner, conv.ID, ChatConversationOperationResponding, ChatConversationStatusStopped, "stopped", 5*time.Minute)
+	if err != nil || !didRecover || recovered.ActiveOperation != "" || recovered.Status != ChatConversationStatusStopped {
+		t.Fatalf("stale operation was not recovered: recovered=%#v didRecover=%v err=%v", recovered, didRecover, err)
+	}
+	if _, err := st.StartChatConversationOperation(ctx, owner, conv.ID, ChatConversationOperationResponding, "", 30*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, didRecover, err := st.RecoverStaleChatConversationOperation(ctx, owner, conv.ID, ChatConversationOperationResponding, ChatConversationStatusStopped, "stopped", 5*time.Minute); err != nil || didRecover {
+		t.Fatalf("fresh operation should remain locked: didRecover=%v err=%v", didRecover, err)
+	}
+}
+
+func TestAvailableChatModelsExcludeDisabledMappings(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	enabled, err := st.CreateProvider(ctx, ProviderInput{Name: "enabled", Protocol: "openai", BaseAPI: "https://enabled.example/v1", APIKeyCipher: "cipher", DefaultModel: "model-on", Models: []string{"model-on"}, Enabled: true, IsDefault: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled, err := st.CreateProvider(ctx, ProviderInput{Name: "disabled", Protocol: "openai", BaseAPI: "https://disabled.example/v1", APIKeyCipher: "cipher", DefaultModel: "model-off", Models: []string{"model-off"}, Enabled: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = enabled
+	if _, err := st.CreateMapping(ctx, "disabled-alias", disabled.ID, "model-off"); err != nil {
+		t.Fatal(err)
+	}
+	models, err := st.AvailableChatModels(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if testContainsString(models, "disabled-alias") || !testContainsString(models, "model-on") {
+		t.Fatalf("unexpected strict chat models: %#v", models)
+	}
+	if _, err := st.ResolveChatRoute(ctx, "disabled-alias"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("disabled mapping should not resolve for chat: %v", err)
+	}
+}
+
+func testContainsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func TestAdminUsageAndRequestLogMetadata(t *testing.T) {
@@ -1175,6 +1347,44 @@ func TestAdminUsageAndRequestLogMetadata(t *testing.T) {
 	}
 }
 
+func TestRecordRequestBillsStoppedEstimatedChatUsage(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.CreateAdmin(ctx, "billing-admin", "hash"); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := st.AdminByUsername(ctx, "billing-admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminID := admin.ID
+	if err := st.RecordRequest(ctx, RequestLog{
+		Protocol: "chat", Model: "model-a", AdminUserID: &adminID, StatusCode: 499,
+		InputTokens: 13, OutputTokens: 5, Billable: true, BillableSet: true,
+		UsageEstimated: true, CompletionStatus: "stopped", RequestType: "chat_message", ToolCalls: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	admin, err = st.AdminUser(ctx, admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admin.RequestCount != 1 || admin.InputTokens != 13 || admin.OutputTokens != 5 {
+		t.Fatalf("stopped billable usage was not aggregated: %#v", admin)
+	}
+	logs, err := st.Logs(ctx, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 || !logs[0].Billable || !logs[0].UsageEstimated || logs[0].CompletionStatus != "stopped" || logs[0].RequestType != "chat_message" || logs[0].ToolCalls != 2 {
+		t.Fatalf("request accounting metadata was not persisted: %#v", logs)
+	}
+}
+
 func TestStoreTokenUsageBuckets(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
@@ -1232,6 +1442,52 @@ func TestStoreTokenUsageBuckets(t *testing.T) {
 
 	if _, err := st.tokenUsageAt(ctx, "30d", 480, now); err != ErrInvalidUsageRange {
 		t.Fatalf("unexpected invalid range error: %v", err)
+	}
+}
+
+func TestStoreChatTurnLifecycleAndLatestRegeneration(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.CreateAdmin(ctx, "chat-lifecycle", "hash"); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := st.AdminByUsername(ctx, "chat-lifecycle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := ChatOwner{Type: ChatOwnerAdmin, ID: admin.ID, Name: admin.Username}
+	conv, err := st.CreateChatConversation(ctx, owner, "", "model", "medium", "", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, assistant, err := st.CreateChatTurn(ctx, owner, conv.ID, "hello", "request-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assistant.ParentMessageID == nil || *assistant.ParentMessageID != user.ID || assistant.RequestID != "request-1" || assistant.Status != ChatMessageStatusGenerating {
+		t.Fatalf("unexpected chat turn: user=%#v assistant=%#v", user, assistant)
+	}
+	assistant, err = st.UpdateChatAssistant(ctx, owner, conv.ID, assistant.ID, "partial", `{"completion_status":"failed"}`, ChatMessageStatusFailed)
+	if err != nil || assistant.Status != ChatMessageStatusFailed {
+		t.Fatalf("assistant failure was not persisted: %#v err=%v", assistant, err)
+	}
+	found, err := st.ChatMessageByRequestID(ctx, owner, conv.ID, "request-1")
+	if err != nil || found.ID != assistant.ID {
+		t.Fatalf("request id lookup failed: %#v err=%v", found, err)
+	}
+	parent, reset, err := st.ResetLatestChatAssistant(ctx, owner, conv.ID, assistant.ID, "request-2")
+	if err != nil || parent.ID != user.ID || reset.Content != "" || reset.Status != ChatMessageStatusGenerating || reset.RequestID != "request-2" {
+		t.Fatalf("latest assistant was not reset: parent=%#v assistant=%#v err=%v", parent, reset, err)
+	}
+	if _, err := st.CreateChatMessage(ctx, owner, conv.ID, ChatRoleUser, "later", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.ResetLatestChatAssistant(ctx, owner, conv.ID, assistant.ID, "request-3"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("non-latest assistant should be rejected, got %v", err)
 	}
 }
 

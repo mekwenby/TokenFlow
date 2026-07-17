@@ -8,6 +8,17 @@ const ROOT = process.cwd();
 
 const isWatch = process.argv.includes("--watch");
 
+const highlightConfig = {
+  entryPoints: [path.join(ROOT, "scripts/highlight-entry.js")],
+  bundle: true,
+  minify: true,
+  format: "esm",
+  target: "es2020",
+  outfile: path.join(ROOT, DIR, "chat/highlight.bundle.js"),
+  banner: { js: "/*! highlight.js 11.11.1 | BSD-3-Clause | https://highlightjs.org/ */" },
+  legalComments: "none",
+};
+
 /** @type {esbuild.BuildOptions} */
 const jsConfig = {
   entryPoints: {
@@ -30,6 +41,7 @@ const cssEntry = [
   "components.css",
   "charts.css",
   "layout.css",
+  "chat.css",
 ].map((file) => `@import "./${file}";`).join("\n");
 
 const cssConfig = {
@@ -47,6 +59,9 @@ const cssConfig = {
 };
 
 if (isWatch) {
+  const highlightCtx = await esbuild.context({ ...highlightConfig, logLevel: "info" });
+  await highlightCtx.watch();
+  console.log("Watching syntax highlighter...");
   const ctx = await esbuild.context({ ...jsConfig, logLevel: "info" });
   await ctx.watch();
   console.log("Watching JS...");
@@ -59,6 +74,7 @@ if (isWatch) {
   fs.rmSync(OUT, { recursive: true, force: true });
   fs.mkdirSync(OUT, { recursive: true });
 
+  await esbuild.build(highlightConfig);
   const jsResult = await esbuild.build(jsConfig);
   const cssResult = await esbuild.build(cssConfig);
 

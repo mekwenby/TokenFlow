@@ -21,6 +21,7 @@ TokenFlow is a Go 1.21 LLM gateway that exposes OpenAI-compatible and Anthropic-
 - Admin UI for providers, model mappings, distribution keys, consumer users, request logs, token usage reports, and model token details.
 - Consumer self-service for registration, login, quota review, personal API key management, and personal request logs.
 - Built-in LLM Chat for both admins and consumers, with conversations, model selection, thinking effort, custom system prompts, nicknames, and optional web search / URL reading tools.
+- Installable Android PWAs for consumer and admin portals, opening `/account/chat` and `/admin/chat` respectively.
 - SQLite storage with automatic migrations.
 - AES-256-GCM encryption for upstream provider API keys.
 
@@ -59,6 +60,12 @@ Recommended first-run setup:
 6. Let consumers create their own API keys from the consumer dashboard.
 
 The service stores data in `data/gateway.db` and encrypts upstream API keys with `data/app.secret`.
+
+## Android PWA
+
+Consumers and administrators can install TokenFlow from the Android Chrome browser menu; there is no in-page install button. The consumer standalone application opens `/account/chat`, while the admin application opens `/admin/chat`.
+
+Production deployments must use HTTPS for service worker registration and PWA installation. `localhost` is supported only for local development checks. Offline mode only shows a public offline page: offline chat is not supported, and login pages, account pages, chat content, authenticated HTML, and API responses are never cached.
 
 ## Build
 
@@ -163,6 +170,7 @@ Environment variables:
 - `GATEWAY_ADDR`: listen address, default `:8019`.
 - `GATEWAY_DATA_DIR`: data directory, default `data`.
 - `INFOFLOW_BASE_URL`: InfoFlow service base URL used by the built-in chat web search and URL reading tools, default `https://infoflow.030399.xyz`.
+- `CHAT_CONTEXT_MAX_RUNES`: character budget applied before built-in Chat sends context upstream, default `262144`; each user message is limited to `131072` Unicode characters.
 
 ## Security And Logging
 

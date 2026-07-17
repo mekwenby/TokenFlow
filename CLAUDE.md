@@ -16,7 +16,7 @@ npm install && npm run build        # minify JS/CSS into web/static/dist/
 go generate ./web                   # same as above, via go:generate
 ```
 
-Startup reads `GATEWAY_ADDR` (default `:8019`), `GATEWAY_DATA_DIR` (default `data`), and `INFOFLOW_BASE_URL` (default `https://infoflow.030399.xyz` — backend for chat web search / URL reading tools).
+Startup reads `GATEWAY_ADDR` (default `:8019`), `GATEWAY_DATA_DIR` (default `data`), `INFOFLOW_BASE_URL` (default `https://infoflow.030399.xyz` — backend for chat web search / URL reading tools), and `CHAT_CONTEXT_MAX_RUNES` (default `262144`).
 
 ## Test
 
@@ -34,13 +34,14 @@ Tests are standard-library only — no testify, ginkgo, etc. Each test creates i
 
 Routes:
 - `GET /` — portal page (i18n en/zh) linking to both admin and account login
+- `GET /manifest.webmanifest`, `GET /admin/manifest.webmanifest`, `GET /service-worker.js`, `GET /offline` — consumer and admin Chat PWA shells
 - `GET /healthz` — liveness check
 - `/admin*` — admin SPA (provider, mapping, key, user, log, stats, chat)
 - `/account/*` — consumer self-service (register, login, dashboard, API key CRUD, chat)
 - `POST /v1/chat/completions`, `GET /v1/models` — OpenAI-compatible proxy
 - `POST /v1/messages`, `POST /anthropic/v1/messages`, `GET /anthropic/v1/models` — Anthropic-compatible proxy
 
-**Config** (`internal/config/config.go`): loads `GATEWAY_ADDR`, `GATEWAY_DATA_DIR`, and `INFOFLOW_BASE_URL` from env vars with sensible defaults.
+**Config** (`internal/config/config.go`): loads `GATEWAY_ADDR`, `GATEWAY_DATA_DIR`, `INFOFLOW_BASE_URL`, and `CHAT_CONTEXT_MAX_RUNES` from env vars with sensible defaults.
 
 **Store** (`internal/store/store.go`): single `*sql.DB` (modernc.org/sqlite, CGo-free). Manages admin users, consumer users (with quota tracking), providers (with encrypted API keys), model mappings, distribution keys (admin-scoped and consumer-scoped), request logs, usage stats, and chat conversations/messages/settings. Auto-migrates schema on `Open()` including backward-compatible column additions. Provides `ResolveRoute(clientModel)` for the routing algorithm and `RecordRequest()` for transactional logging + stats + quota updates.
 
@@ -61,7 +62,7 @@ Routes:
 
 **Account** (`internal/account/account.go`): consumer-facing self-service portal. Registration (pending by default, admin must enable), login, dashboard with quota/usage summary, and API key CRUD. Uses scoped sessions at path `/account` (separate cookies from admin), embedded Go templates with `text/template`, and i18n (en/zh-CN). Dashboard shows compact-number formatting (1.2K, 3.4M, 5B) for quota/usage.
 
-**Chat** (`internal/chat/`): built-in LLM chat with conversation management, SSE streaming, and tool use. `Service` wraps the store and secret box, reusing the routing algorithm (`ResolveRoute`) and usage recording. `SendMessage` emits per-chunk `delta` events via SSE and accumulates tool calls (web_search, read_url) that delegate to an external InfoFlow backend. Handles thinking-effort parameters with automatic retry fallbacks (remove thinking → remove streaming → non-streaming). Conversation titles are auto-generated via the same model-routing path. Routes are mounted under both `/admin/chat` and `/account/chat` via `RegisterRoutes` (`internal/chat/http.go`), which accepts a pluggable `RouteConfig` for owner resolution and CSRF enforcement. Has its own SSE parser (`internal/chat/sse.go`) separate from the proxy's.
+**Chat** (`internal/chat/`): built-in LLM chat with conversation management, SSE streaming, and tool use. `Service` wraps the store and secret box, reusing the routing algorithm (`ResolveRoute`) and usage recording. Each main chat request injects the browser IANA time zone's current calendar date into the dynamic system prompt; title and context-summary prompts remain date-free. `SendMessage` emits per-chunk `delta` events via SSE and accumulates tool calls (web_search, read_url) that delegate to an external InfoFlow backend. Handles thinking-effort parameters with automatic retry fallbacks (remove thinking → remove streaming → non-streaming). Conversation titles are auto-generated via the same model-routing path. Routes are mounted under both `/admin/chat` and `/account/chat` via `RegisterRoutes` (`internal/chat/http.go`), which accepts a pluggable `RouteConfig` for owner resolution and CSRF enforcement. Has its own SSE parser (`internal/chat/sse.go`) separate from the proxy's.
 
 **HTTP utilities** (`internal/httputil/`): shared helpers used by both admin and account — `WriteError`, `DecodePayload`, `IDParam`, `WriteResult`, `NormalizeLang`, `LanguageFromRequest`, `SetLanguageCookie`, `SafeNextPath`.
 
@@ -69,7 +70,7 @@ Routes:
 
 **Secret** (`internal/secret/secret.go`): AES-256-GCM encrypt/decrypt for upstream API keys. Key material persisted in `data/app.secret`; auto-generated if missing.
 
-**Web** (`web/web.go`): embeds `web/static/*` via `embed.FS` for serving CSS, JS, icons, and the logo. Frontend is organized as ES modules:
+**Web** (`web/web.go`): embeds `web/static/*` via `embed.FS` for serving CSS, JS, icons, the logo, and consumer PWA resources. The PWA service worker only caches public static resources and the offline page; authenticated navigation and all APIs stay network-only. Frontend is organized as ES modules:
 
 - `theme.js` — light/dark theme toggle (loads before paint on every page)
 - `core/` — api.js (CSRF-aware fetch client factory), dom.js (esc, loading/error HTML, form busy), state.js (Store class via EventTarget), format.js, toast.js, confirm.js, nav.js

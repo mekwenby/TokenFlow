@@ -1,0 +1,47 @@
+{
+  "id": "/account/chat",
+  "name": "TokenFlow LLM Chat",
+  "short_name": "TokenFlow",
+  "description": "TokenFlow LLM Chat for unified model access.",
+  "start_url": "/account/chat",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#101820",
+  "background_color": "#101820",
+  "categories": ["productivity", "utilities"],
+  "icons": [
+    {
+      "src": "/admin/static/pwa/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/admin/static/pwa/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/admin/static/pwa/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "LLM Chat",
+      "short_name": "Chat",
+      "url": "/account/chat",
+      "icons": [{"src": "/admin/static/pwa/icon-192.png", "sizes": "192x192", "type": "image/png"}]
+    },
+    {
+      "name": "Account",
+      "short_name": "Account",
+      "url": "/account",
+      "icons": [{"src": "/admin/static/pwa/icon-192.png", "sizes": "192x192", "type": "image/png"}]
+    }
+  ]
+}

@@ -136,7 +136,7 @@ func TestRegisterLoginAndConsumerKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	otherRec := httptest.NewRecorder()
-	if err := handler.sessions.Create(otherRec, other.ID, other.Email); err != nil {
+	if err := handler.sessions.Create(otherRec, httptest.NewRequest(http.MethodGet, "/account", nil), other.ID); err != nil {
 		t.Fatal(err)
 	}
 	otherCookies, otherCSRF := accountCookies(otherRec)
@@ -198,7 +198,7 @@ func TestAccountLogsAPIIsScopedAndSearchable(t *testing.T) {
 		}
 	}
 	loginRecorder := httptest.NewRecorder()
-	if err := handler.sessions.Create(loginRecorder, user.ID, user.Email); err != nil {
+	if err := handler.sessions.Create(loginRecorder, httptest.NewRequest(http.MethodGet, "/account", nil), user.ID); err != nil {
 		t.Fatal(err)
 	}
 	cookies, _ := accountCookies(loginRecorder)
@@ -267,6 +267,9 @@ func TestAccountLogsAPIIsScopedAndSearchable(t *testing.T) {
 
 func TestAccountChatAPIRequiresSessionCSRFAndQuota(t *testing.T) {
 	handler, router := testAccount(t)
+	if _, err := handler.store.CreateProvider(context.Background(), store.ProviderInput{Name: "chat-test", Protocol: "openai", BaseAPI: "https://example.test/v1", APIKeyCipher: "cipher", DefaultModel: "model-a", Models: []string{"model-a"}, Enabled: true, IsDefault: true}); err != nil {
+		t.Fatal(err)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/account/chat", nil)
 	rec := httptest.NewRecorder()
@@ -291,7 +294,7 @@ func TestAccountChatAPIRequiresSessionCSRFAndQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 	loginRecorder := httptest.NewRecorder()
-	if err := handler.sessions.Create(loginRecorder, user.ID, user.Email); err != nil {
+	if err := handler.sessions.Create(loginRecorder, httptest.NewRequest(http.MethodGet, "/account", nil), user.ID); err != nil {
 		t.Fatal(err)
 	}
 	cookies, csrf := accountCookies(loginRecorder)
@@ -302,26 +305,35 @@ func TestAccountChatAPIRequiresSessionCSRFAndQuota(t *testing.T) {
 	}
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"models"`) || !strings.Contains(rec.Body.String(), `"default_system_prompt"`) || !strings.Contains(rec.Body.String(), `"max_tool_calls"`) {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"models"`) || !strings.Contains(rec.Body.String(), `"default_system_prompt"`) || !strings.Contains(rec.Body.String(), `"max_tool_calls"`) || !strings.Contains(rec.Body.String(), `"max_user_message_chars":131072`) {
 		t.Fatalf("unexpected chat models response: %d %s", rec.Code, rec.Body.String())
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/account/chat", nil)
+	req.AddCookie(&http.Cookie{Name: adminLangCookie, Value: "zh-CN"})
 	for _, cookie := range cookies {
 		req.AddCookie(cookie)
 	}
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	body := rec.Body.String()
-	for _, expected := range []string{`class="admin-page chat-page"`, `data-chat-root`, `data-chat-lang=`, `data-chat-api-prefix="/account/api/chat"`, `data-chat-csrf-cookie="gateway_account_csrf"`, `data-chat-settings-writable="false"`, `data-chat-process-shell`, `data-chat-process-top`, `data-chat-process-bottom`, `data-chat-process-collapse`, `data-chat-process-reopen`, `data-chat-user-avatar`, `data-chat-assistant-avatar`, `data-chat-max-tool-calls`, `data-chat-default-system-prompt`, `data-chat-auto-title`, `chat/app.js`, `href="/account"`} {
+	if !strings.Contains(body, "一念通流 TokenFlow") {
+		t.Fatalf("account chat page is missing the Chinese brand: %s", body)
+	}
+	assertAccountPWA(t, body)
+	if !strings.Contains(body, `content="width=device-width, initial-scale=1, viewport-fit=cover"`) {
+		t.Fatalf("account chat page should opt into safe-area viewport handling: %s", body)
+	}
+	for _, expected := range []string{`class="admin-page chat-page"`, `data-chat-root`, `data-chat-ready="false"`, `data-chat-lang=`, `data-chat-api-prefix="/account/api/chat"`, `data-chat-csrf-cookie="gateway_account_csrf"`, `data-chat-settings-writable="false"`, `data-chat-sidebar`, `data-chat-sidebar-toggle`, `data-chat-conversation-search`, `data-chat-account-menu`, `data-chat-tools-menu`, `data-chat-process`, `data-chat-scroll-bottom`, `data-chat-user-avatar`, `data-chat-assistant-avatar`, `data-chat-max-tool-calls`, `data-chat-default-system-prompt`, `data-chat-auto-title`, `css/chat.css`, `chat/app.js`, `href="/account"`} {
 		if rec.Code != http.StatusOK || !strings.Contains(body, expected) {
 			t.Fatalf("missing %q in account chat page: status=%d body=%s", expected, rec.Code, body)
 		}
 	}
-	if strings.Contains(body, "account/app.js") || strings.Contains(body, `id="account-api-section"`) {
-		t.Fatalf("account chat page should not render dashboard sections/scripts:\n%s", body)
+	for _, unexpected := range []string{"account/app.js", `id="account-api-section"`, `class="topbar"`, `data-chat-process-shell`, `data-chat-character-count`} {
+		if strings.Contains(body, unexpected) {
+			t.Fatalf("account chat page should not render %q:\n%s", unexpected, body)
+		}
 	}
-
 	req = httptest.NewRequest(http.MethodPost, "/account/api/chat/conversations", strings.NewReader(`{"title":"test"}`))
 	req.Header.Set("Content-Type", "application/json")
 	for _, cookie := range cookies {
@@ -404,7 +416,7 @@ func TestAccountChatAPIRequiresSessionCSRFAndQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 	otherRecorder := httptest.NewRecorder()
-	if err := handler.sessions.Create(otherRecorder, other.ID, other.Email); err != nil {
+	if err := handler.sessions.Create(otherRecorder, httptest.NewRequest(http.MethodGet, "/account", nil), other.ID); err != nil {
 		t.Fatal(err)
 	}
 	otherCookies, otherCSRF := accountCookies(otherRecorder)
@@ -443,7 +455,7 @@ func TestAccountChatAPIRequiresSessionCSRFAndQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 	limitedRecorder := httptest.NewRecorder()
-	if err := handler.sessions.Create(limitedRecorder, limited.ID, limited.Email); err != nil {
+	if err := handler.sessions.Create(limitedRecorder, httptest.NewRequest(http.MethodGet, "/account", nil), limited.ID); err != nil {
 		t.Fatal(err)
 	}
 	limitedCookies, limitedCSRF := accountCookies(limitedRecorder)
@@ -468,7 +480,8 @@ func TestAccountPagesUseLanguageAndSharedScripts(t *testing.T) {
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	body := rec.Body.String()
-	if rec.Code != http.StatusOK || !strings.Contains(body, `<html lang="zh-CN">`) || !strings.Contains(body, "创建账号") || !strings.Contains(body, "注册") {
+	assertAccountPWA(t, body)
+	if rec.Code != http.StatusOK || !strings.Contains(body, `<html lang="zh-CN">`) || !strings.Contains(body, "创建账号") || !strings.Contains(body, "注册") || !strings.Contains(body, "一念通流 TokenFlow") {
 		t.Fatalf("expected Chinese register page, got status=%d body=%s", rec.Code, body)
 	}
 
@@ -478,6 +491,7 @@ func TestAccountPagesUseLanguageAndSharedScripts(t *testing.T) {
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	body = rec.Body.String()
+	assertAccountPWA(t, body)
 	if rec.Code != http.StatusOK || !strings.Contains(body, `<html lang="en">`) || !strings.Contains(body, "Account login") {
 		t.Fatalf("expected English login page from language cookie, got status=%d body=%s", rec.Code, body)
 	}
@@ -491,15 +505,19 @@ func TestAccountPagesUseLanguageAndSharedScripts(t *testing.T) {
 		t.Fatal(err)
 	}
 	loginRecorder := httptest.NewRecorder()
-	if err := handler.sessions.Create(loginRecorder, user.ID, user.Email); err != nil {
+	if err := handler.sessions.Create(loginRecorder, httptest.NewRequest(http.MethodGet, "/account", nil), user.ID); err != nil {
 		t.Fatal(err)
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/account", nil)
 	req.AddCookie(&http.Cookie{Name: adminLangCookie, Value: "zh-CN"})
+	csrfValue := ""
 	for _, cookie := range loginRecorder.Result().Cookies() {
 		if cookie.Name == sessionCookie || cookie.Name == csrfCookie {
 			req.AddCookie(cookie)
+		}
+		if cookie.Name == csrfCookie {
+			csrfValue = cookie.Value
 		}
 	}
 	rec = httptest.NewRecorder()
@@ -510,12 +528,65 @@ func TestAccountPagesUseLanguageAndSharedScripts(t *testing.T) {
 			t.Fatalf("missing %q in account dashboard:\n%s", expected, body)
 		}
 	}
-	if !strings.Contains(body, `href="/account/chat"`) {
-		t.Fatalf("account dashboard should expose chat from the top bar:\n%s", body)
+	assertAccountPWA(t, body)
+	if csrfValue == "" || !strings.Contains(body, `name="csrf" value="`+csrfValue+`"`) {
+		t.Fatal("account logout form is missing its session-bound csrf token")
+	}
+	topbarStart := strings.Index(body, `<header class="topbar">`)
+	if topbarStart < 0 {
+		t.Fatal("account dashboard is missing top bar")
+	}
+	topbarEnd := strings.Index(body[topbarStart:], `</header>`)
+	if topbarEnd < 0 {
+		t.Fatal("account dashboard top bar is not closed")
+	}
+	topbar := body[topbarStart : topbarStart+topbarEnd]
+	if strings.Contains(topbar, `href="/account/chat"`) {
+		t.Fatalf("account top bar should not contain the moved chat entry:\n%s", topbar)
+	}
+	sideStart := strings.Index(body, `<aside class="side-nav"`)
+	if sideStart < 0 {
+		t.Fatal("account dashboard is missing desktop navigation")
+	}
+	sideEnd := strings.Index(body[sideStart:], `</aside>`)
+	if sideEnd < 0 {
+		t.Fatal("account dashboard desktop navigation is not closed")
+	}
+	sideNav := body[sideStart : sideStart+sideEnd]
+	chatIndex := strings.Index(sideNav, `href="/account/chat"`)
+	usageIndex := strings.Index(sideNav, `href="#account-usage-section"`)
+	if chatIndex < 0 || usageIndex < 0 || chatIndex > usageIndex || !strings.Contains(sideNav, `icons.svg#icon-chat`) {
+		t.Fatalf("account desktop navigation should start with the dedicated chat entry:\n%s", sideNav)
+	}
+	mobileStart := strings.Index(body, `<nav class="mobile-nav"`)
+	if mobileStart < 0 {
+		t.Fatal("account dashboard is missing mobile navigation")
+	}
+	mobileEnd := strings.Index(body[mobileStart:], `</nav>`)
+	if mobileEnd < 0 {
+		t.Fatal("account dashboard mobile navigation is not closed")
+	}
+	mobileNav := body[mobileStart : mobileStart+mobileEnd]
+	chatIndex = strings.Index(mobileNav, `href="/account/chat"`)
+	usageIndex = strings.Index(mobileNav, `href="#account-usage-section"`)
+	if count := strings.Count(mobileNav, `<a class="nav-item`); count != 5 {
+		t.Fatalf("account mobile navigation should have 5 entries, got %d", count)
+	}
+	if chatIndex < 0 || usageIndex < 0 || chatIndex > usageIndex {
+		t.Fatalf("account mobile navigation should start with chat:\n%s", mobileNav)
 	}
 	for _, unexpected := range []string{`data-chat-root`, `account-chat-section`, `chat/app.js`} {
 		if strings.Contains(body, unexpected) {
 			t.Fatalf("account dashboard should not include %q:\n%s", unexpected, body)
+		}
+	}
+}
+
+func assertAccountPWA(t *testing.T, body string) {
+	t.Helper()
+	for _, expected := range []string{`rel="manifest" href="/manifest.webmanifest"`, `name="theme-color" content="#101820"`, `src="/admin/static/pwa/register.js"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("account page is missing PWA declaration %q:\n%s", expected, body)
 		}
 	}
 }
@@ -525,6 +596,12 @@ func TestAccountTranslationsIncludeChineseKeys(t *testing.T) {
 		if _, ok := accountTranslations["zh-CN"][key]; !ok {
 			t.Fatalf("missing zh-CN account translation for %q", key)
 		}
+	}
+	if got := accountTr("zh-CN", "app.title"); got != "一念通流 TokenFlow" {
+		t.Fatalf("unexpected Chinese brand: %q", got)
+	}
+	if got := accountTr("en", "app.title"); got != "TokenFlow" {
+		t.Fatalf("unexpected English brand: %q", got)
 	}
 }
 
@@ -554,7 +631,7 @@ func TestAccountDashboardFormatsSummaryNumbers(t *testing.T) {
 		}
 	}
 	loginRecorder := httptest.NewRecorder()
-	if err := handler.sessions.Create(loginRecorder, user.ID, user.Email); err != nil {
+	if err := handler.sessions.Create(loginRecorder, httptest.NewRequest(http.MethodGet, "/account", nil), user.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -586,6 +663,60 @@ func TestCompactNumber(t *testing.T) {
 		if got := compactNumber(value); got != expected {
 			t.Fatalf("compactNumber(%d) = %q, want %q", value, got, expected)
 		}
+	}
+}
+
+func TestAccountLogoutRequiresCSRFAndRevokesAllDevices(t *testing.T) {
+	handler, router := testAccount(t)
+	user, err := handler.store.CreateConsumerUser(context.Background(), "logout@example.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err = handler.store.UpdateConsumerUser(context.Background(), user.ID, store.ConsumerStatusEnabled, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRec := httptest.NewRecorder()
+	if err := handler.sessions.Create(firstRec, httptest.NewRequest(http.MethodGet, "/account", nil), user.ID); err != nil {
+		t.Fatal(err)
+	}
+	firstCookies, firstCSRF := accountCookies(firstRec)
+	secondRec := httptest.NewRecorder()
+	if err := handler.sessions.Create(secondRec, httptest.NewRequest(http.MethodGet, "/account", nil), user.ID); err != nil {
+		t.Fatal(err)
+	}
+	secondCookies, _ := accountCookies(secondRec)
+
+	req := httptest.NewRequest(http.MethodPost, "/account/logout", nil)
+	for _, cookie := range firstCookies {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("logout without csrf should be rejected: %d %s", rec.Code, rec.Body.String())
+	}
+
+	form := url.Values{"csrf": {firstCSRF}}
+	req = httptest.NewRequest(http.MethodPost, "/account/logout", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for _, cookie := range firstCookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/account/login" {
+		t.Fatalf("valid logout should redirect: %d %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/account/api/keys", nil)
+	for _, cookie := range secondCookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("second device should be revoked after logout: %d %s", rec.Code, rec.Body.String())
 	}
 }
 

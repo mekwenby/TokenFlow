@@ -4,12 +4,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 
 	"tokenflow/internal/store"
+)
+
+const (
+	chatMessageBodyLimit = 2 << 20
+	chatWriteBodyLimit   = 256 << 10
 )
 
 type RouteConfig struct {
@@ -50,6 +56,8 @@ func RegisterRoutes(r chi.Router, cfg RouteConfig) {
 	r.Delete(base+"/conversations/{conversationID}", h.conversation)
 	r.Post(base+"/conversations/{conversationID}/title", h.title)
 	r.Post(base+"/conversations/{conversationID}/messages", h.messages)
+	r.Post(base+"/conversations/{conversationID}/messages/{messageID}/regenerate", h.regenerate)
+	r.Post(base+"/conversations/{conversationID}/stop", h.stop)
 }
 
 func (h routeHandler) models(w http.ResponseWriter, r *http.Request) {
@@ -59,9 +67,10 @@ func (h routeHandler) models(w http.ResponseWriter, r *http.Request) {
 		maxToolCalls, err = h.cfg.Store.ChatMaxToolCalls(r.Context())
 	}
 	writeChatResult(w, map[string]any{
-		"models":                models,
-		"default_system_prompt": h.cfg.Service.DefaultSystemPrompt(),
-		"max_tool_calls":        maxToolCalls,
+		"models":                 models,
+		"default_system_prompt":  h.cfg.Service.DefaultSystemPrompt(),
+		"max_tool_calls":         maxToolCalls,
+		"max_user_message_chars": MaxUserMessageRunes,
 	}, err)
 }
 
@@ -85,7 +94,7 @@ func (h routeHandler) settings(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
 			MaxToolCalls int `json:"max_tool_calls"`
 		}
-		if !decodeChatPayload(w, r, &payload) {
+		if !decodeChatPayload(w, r, &payload, chatWriteBodyLimit) {
 			return
 		}
 		maxToolCalls, err := h.cfg.Store.UpdateChatMaxToolCalls(r.Context(), payload.MaxToolCalls)
@@ -115,7 +124,11 @@ func (h routeHandler) conversations(w http.ResponseWriter, r *http.Request) {
 			UserAvatar      string `json:"user_avatar"`
 			AssistantAvatar string `json:"assistant_avatar"`
 		}
-		if !decodeChatPayload(w, r, &payload) {
+		if !decodeChatPayload(w, r, &payload, chatWriteBodyLimit) {
+			return
+		}
+		if err := h.cfg.Service.ValidateModel(r.Context(), payload.Model); err != nil {
+			writeChatResult(w, nil, err)
 			return
 		}
 		conv, err := h.cfg.Store.CreateChatConversation(r.Context(), owner, payload.Title, payload.Model, payload.ThinkingEffort, payload.SystemPrompt, payload.Nickname, payload.UserAvatar, payload.AssistantAvatar)
@@ -143,8 +156,14 @@ func (h routeHandler) conversation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var payload conversationPayload
-		if !decodeChatPayload(w, r, &payload) {
+		if !decodeChatPayload(w, r, &payload, chatWriteBodyLimit) {
 			return
+		}
+		if payload.Model != nil {
+			if err := h.cfg.Service.ValidateModel(r.Context(), *payload.Model); err != nil {
+				writeChatResult(w, nil, err)
+				return
+			}
 		}
 		conv, err := h.cfg.Store.UpdateChatConversation(r.Context(), owner, id, payload.Title, payload.Model, payload.ThinkingEffort, payload.SystemPrompt, payload.Nickname, payload.UserAvatar, payload.AssistantAvatar)
 		writeChatResult(w, conv, err)
@@ -152,7 +171,7 @@ func (h routeHandler) conversation(w http.ResponseWriter, r *http.Request) {
 		if !h.cfg.RequireCSRF(w, r) {
 			return
 		}
-		writeChatResult(w, map[string]bool{"ok": true}, h.cfg.Store.DeleteChatConversation(r.Context(), owner, id))
+		writeChatResult(w, map[string]bool{"ok": true}, h.cfg.Service.DeleteConversation(r.Context(), owner, id))
 	}
 }
 
@@ -165,20 +184,66 @@ func (h routeHandler) messages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var payload SendRequest
-	if !decodeChatPayload(w, r, &payload) {
+	if !decodeChatPayload(w, r, &payload, chatMessageBodyLimit) {
 		return
 	}
-	if err := h.cfg.Service.CanChat(r.Context(), owner); err != nil {
+	if err := h.cfg.Service.PreflightMessage(r.Context(), owner, conversationID(r), payload); err != nil {
 		writeChatResult(w, nil, err)
 		return
 	}
 
+	emit := startChatStream(w)
+	if _, err := h.cfg.Service.SendMessage(r.Context(), owner, conversationID(r), payload, emit); err != nil {
+		_ = emit("error", streamError(err))
+	}
+}
+
+func (h routeHandler) regenerate(w http.ResponseWriter, r *http.Request) {
+	owner, ok := h.owner(w, r)
+	if !ok {
+		return
+	}
+	if !h.cfg.RequireCSRF(w, r) {
+		return
+	}
+	var payload SendRequest
+	if !decodeChatPayload(w, r, &payload, chatWriteBodyLimit) {
+		return
+	}
+	conversationID := conversationID(r)
+	messageID := routeInt64(r, "messageID")
+	if err := h.cfg.Service.PreflightRegenerate(r.Context(), owner, conversationID, messageID); err != nil {
+		writeChatResult(w, nil, err)
+		return
+	}
+	emit := startChatStream(w)
+	if _, err := h.cfg.Service.RegenerateMessage(r.Context(), owner, conversationID, messageID, payload, emit); err != nil {
+		_ = emit("error", streamError(err))
+	}
+}
+
+func (h routeHandler) stop(w http.ResponseWriter, r *http.Request) {
+	owner, ok := h.owner(w, r)
+	if !ok {
+		return
+	}
+	if !h.cfg.RequireCSRF(w, r) {
+		return
+	}
+	stopped, err := h.cfg.Service.StopConversation(r.Context(), owner, conversationID(r))
+	writeChatResult(w, map[string]any{"ok": err == nil, "stopped": stopped}, err)
+}
+
+func startChatStream(w http.ResponseWriter) Emitter {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 	flusher, _ := w.(http.Flusher)
-	emit := func(event string, payload any) error {
+	if flusher != nil {
+		flusher.Flush()
+	}
+	return func(event string, payload any) error {
 		raw, err := json.Marshal(payload)
 		if err != nil {
 			raw, _ = json.Marshal(map[string]any{"error": err.Error()})
@@ -191,12 +256,10 @@ func (h routeHandler) messages(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	}
-	if flusher != nil {
-		flusher.Flush()
-	}
-	if _, err := h.cfg.Service.SendMessage(r.Context(), owner, conversationID(r), payload, emit); err != nil {
-		_ = emit("error", map[string]any{"message": chatErrorMessage(err)})
-	}
+}
+
+func streamError(err error) map[string]any {
+	return map[string]any{"message": chatErrorMessage(err), "code": chatErrorCode(err), "retryable": errors.Is(err, store.ErrChatConversationBusy)}
 }
 
 func (h routeHandler) title(w http.ResponseWriter, r *http.Request) {
@@ -207,7 +270,19 @@ func (h routeHandler) title(w http.ResponseWriter, r *http.Request) {
 	if !h.cfg.RequireCSRF(w, r) {
 		return
 	}
-	conv, err := h.cfg.Service.GenerateConversationTitle(r.Context(), owner, conversationID(r), true)
+	payload := struct {
+		Force *bool `json:"force"`
+	}{}
+	force := true
+	if r.ContentLength != 0 {
+		if !decodeChatPayload(w, r, &payload, chatWriteBodyLimit) {
+			return
+		}
+		if payload.Force != nil {
+			force = *payload.Force
+		}
+	}
+	conv, err := h.cfg.Service.GenerateConversationTitle(r.Context(), owner, conversationID(r), force)
 	writeChatResult(w, conv, err)
 }
 
@@ -225,7 +300,12 @@ func (h routeHandler) owner(w http.ResponseWriter, r *http.Request) (store.ChatO
 }
 
 func conversationID(r *http.Request) int64 {
-	id, _ := strconvParseInt(chi.URLParam(r, "conversationID"))
+	id := routeInt64(r, "conversationID")
+	return id
+}
+
+func routeInt64(r *http.Request, name string) int64 {
+	id, _ := strconvParseInt(chi.URLParam(r, name))
 	return id
 }
 
@@ -240,11 +320,21 @@ func strconvParseInt(value string) (int64, error) {
 	return id, nil
 }
 
-func decodeChatPayload(w http.ResponseWriter, r *http.Request, dst any) bool {
+func decodeChatPayload(w http.ResponseWriter, r *http.Request, dst any, maxBytes int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	dec := json.NewDecoder(r.Body)
 	dec.UseNumber()
 	if err := dec.Decode(dst); err != nil {
-		writeChatError(w, http.StatusBadRequest, "invalid JSON body")
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeChatErrorCode(w, http.StatusRequestEntityTooLarge, "message_too_large", "request body is too large")
+			return false
+		}
+		writeChatErrorCode(w, http.StatusBadRequest, "invalid_json", "invalid JSON body")
+		return false
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeChatErrorCode(w, http.StatusBadRequest, "invalid_json", "request body must contain exactly one JSON value")
 		return false
 	}
 	return true
@@ -252,6 +342,21 @@ func decodeChatPayload(w http.ResponseWriter, r *http.Request, dst any) bool {
 
 func writeChatResult(w http.ResponseWriter, body any, err error) {
 	if err != nil {
+		if code := chatErrorCode(err); code != "" {
+			status := http.StatusBadRequest
+			switch code {
+			case "message_too_large":
+				status = http.StatusRequestEntityTooLarge
+			case "model_unavailable", "conversation_busy", "message_not_latest":
+				status = http.StatusConflict
+			case "quota_exceeded":
+				status = http.StatusTooManyRequests
+			case "accounting_failed":
+				status = http.StatusInternalServerError
+			}
+			writeChatErrorCode(w, status, code, chatErrorMessage(err))
+			return
+		}
 		status := http.StatusInternalServerError
 		if errors.Is(err, store.ErrNotFound) {
 			status = http.StatusNotFound
@@ -284,10 +389,47 @@ func writeChatResult(w http.ResponseWriter, body any, err error) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
+func chatErrorCode(err error) string {
+	switch {
+	case errors.Is(err, ErrEmptyMessage):
+		return "message_required"
+	case errors.Is(err, ErrMessageTooLarge):
+		return "message_too_large"
+	case errors.Is(err, ErrContextTooLarge):
+		return "context_too_large"
+	case errors.Is(err, ErrModelUnavailable), errors.Is(err, ErrNoModel):
+		return "model_unavailable"
+	case errors.Is(err, store.ErrChatConversationBusy):
+		return "conversation_busy"
+	case errors.Is(err, store.ErrQuotaExceeded):
+		return "quota_exceeded"
+	case errors.Is(err, ErrAccountingFailed):
+		return "accounting_failed"
+	case errors.Is(err, ErrNoTitleMessages):
+		return "title_no_messages"
+	case errors.Is(err, ErrMessageNotLatest):
+		return "message_not_latest"
+	default:
+		return ""
+	}
+}
+
 func writeChatError(w http.ResponseWriter, status int, message string) {
+	writeChatErrorCode(w, status, "", message)
+}
+
+func writeChatErrorCode(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": message})
+	retryable := code == "conversation_busy" || code == "" && retryableStatus(status)
+	if code == "quota_exceeded" || code == "accounting_failed" {
+		retryable = false
+	}
+	body := map[string]any{"error": message, "retryable": retryable}
+	if code != "" {
+		body["code"] = code
+	}
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 func chatErrorMessage(err error) string {

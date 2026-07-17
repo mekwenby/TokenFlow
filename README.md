@@ -1,14 +1,16 @@
-# TokenFlow
+# 一念通流 TokenFlow
 
 中文 | [English](README.en.md)
 
-TokenFlow 是一个基于 Go 1.21 的 LLM 网关，对外提供兼容 OpenAI 和 Anthropic 的 API。它支持 SQLite 持久化、上游供应商密钥加密、模型路由、跨协议转换、SSE 流式代理、请求用量日志、管理员后台、普通用户自助门户，以及内置 LLM Chat。
+> 一念通流，百模可达。
+
+一念通流 TokenFlow 是一个兼容 OpenAI 与 Anthropic 协议的 LLM 网关。它基于 Go 1.21，支持 SQLite 持久化、上游供应商密钥加密、模型路由、跨协议转换、SSE 流式代理、请求用量日志、管理员后台、普通用户自助门户，以及内置 LLM Chat。
 
 ## 界面预览
 
-![TokenFlow 管理后台概览](images/1.webp)
+![一念通流 TokenFlow 管理后台概览](images/1.webp)
 
-![TokenFlow 模型 Token 明细](images/2.webp)
+![一念通流 TokenFlow 模型 Token 明细](images/2.webp)
 
 ## 功能
 
@@ -21,6 +23,7 @@ TokenFlow 是一个基于 Go 1.21 的 LLM 网关，对外提供兼容 OpenAI 和
 - 管理员后台可维护供应商、模型映射、分发密钥、普通用户、请求日志、Token 用量统计和模型 Token 明细。
 - 普通用户可自助注册、登录、查看额度、管理自己的 API Key，并查看自己的请求记录。
 - 管理员和普通用户都可以使用内置 LLM Chat；聊天支持会话、模型选择、思考强度、自定义系统提示词、昵称，以及可选的网页搜索和 URL 读取工具。
+- 普通用户和管理员门户都支持安装为 Android PWA，分别默认打开 `/account/chat` 和 `/admin/chat`。
 - 使用 SQLite 存储，并在启动时自动迁移数据库结构。
 - 使用 AES-256-GCM 加密保存上游供应商 API 密钥。
 
@@ -59,6 +62,12 @@ go run ./cmd/server
 6. 让普通用户在自己的控制台创建 API Key。
 
 服务会把数据保存到 `data/gateway.db`，并使用 `data/app.secret` 加密上游 API 密钥。
+
+## Android PWA
+
+普通用户和管理员都可通过 Android Chrome 的浏览器菜单安装 TokenFlow，无需页面内安装按钮。普通用户应用以 standalone 模式打开 `/account/chat`，管理员应用打开 `/admin/chat`。
+
+生产环境必须使用 HTTPS 才能注册 Service Worker 和安装 PWA；`localhost` 仅适用于本地开发验证。离线模式只显示公开离线提示页，不支持离线聊天，也不会缓存登录页、账户页、聊天内容、认证页面或任何 API 响应。
 
 ## 构建
 
@@ -150,7 +159,7 @@ curl http://localhost:8019/v1/messages \
 
 ## 路由规则
 
-TokenFlow 会按以下顺序解析每个请求：
+一念通流 TokenFlow 会按以下顺序解析每个请求：
 
 1. 优先使用精确模型映射，将客户端模型映射到指定供应商和上游模型。
 2. 如果没有映射，则查找已启用且声明支持该模型的供应商，并使用相同的上游模型名。
@@ -163,6 +172,7 @@ TokenFlow 会按以下顺序解析每个请求：
 - `GATEWAY_ADDR`：监听地址，默认值为 `:8019`。
 - `GATEWAY_DATA_DIR`：数据目录，默认值为 `data`。
 - `INFOFLOW_BASE_URL`：内置聊天网页搜索和 URL 读取工具使用的 InfoFlow 服务地址，默认值为 `https://infoflow.030399.xyz`。
+- `CHAT_CONTEXT_MAX_RUNES`：内置聊天发送给上游前的上下文字符预算，默认值为 `262144`；单条用户消息固定最多 `131072` 个 Unicode 字符。
 
 ## 安全与日志
 

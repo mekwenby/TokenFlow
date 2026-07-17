@@ -158,10 +158,10 @@ var translations = map[string]map[string]string{
 		"invalid_user_status":     "status must be pending, enabled, or disabled",
 	},
 	"zh-CN": {
-		"app.title":               "TokenFlow",
+		"app.title":               "一念通流 TokenFlow",
 		"title.login":             "登录",
 		"title.setup":             "初始化",
-		"title.dashboard":         "TokenFlow 管理",
+		"title.dashboard":         "一念通流 TokenFlow 管理",
 		"language":                "语言",
 		"lang.en":                 "English",
 		"lang.zh":                 "简体中文",

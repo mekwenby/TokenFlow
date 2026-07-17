@@ -31,7 +31,8 @@ func TestLoginUsesAcceptLanguageAndCookieOverride(t *testing.T) {
 		t.Fatalf("unexpected status: %d", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, `<html lang="zh-CN">`) || !strings.Contains(body, "登录") {
+	assertAdminPWA(t, body)
+	if !strings.Contains(body, `<html lang="zh-CN">`) || !strings.Contains(body, "登录") || !strings.Contains(body, "一念通流 TokenFlow") {
 		t.Fatalf("expected Chinese login page, got:\n%s", body)
 	}
 
@@ -54,6 +55,12 @@ func TestAdminTranslationsIncludeChineseKeys(t *testing.T) {
 	}
 	if got := tr("zh-CN", "invalid_detail_scope"); !strings.Contains(got, "user") {
 		t.Fatalf("invalid_detail_scope should mention user, got %q", got)
+	}
+	if got := tr("zh-CN", "app.title"); got != "一念通流 TokenFlow" {
+		t.Fatalf("unexpected Chinese brand: %q", got)
+	}
+	if got := tr("en", "app.title"); got != "TokenFlow" {
+		t.Fatalf("unexpected English brand: %q", got)
 	}
 }
 
@@ -106,15 +113,19 @@ func TestLanguagePostRejectsInvalidLanguage(t *testing.T) {
 func TestDashboardInjectsLanguageAndTranslations(t *testing.T) {
 	handler, router := testAdmin(t)
 	loginRecorder := httptest.NewRecorder()
-	if err := handler.sessions.Create(loginRecorder, 1, "admin"); err != nil {
+	if err := handler.sessions.Create(loginRecorder, httptest.NewRequest(http.MethodGet, "/admin", nil), 1); err != nil {
 		t.Fatal(err)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/admin", nil)
 	req.AddCookie(&http.Cookie{Name: langCookie, Value: "zh-CN"})
+	csrfValue := ""
 	for _, cookie := range loginRecorder.Result().Cookies() {
 		if cookie.Name == auth.SessionCookie || cookie.Name == auth.CSRFCookie {
 			req.AddCookie(cookie)
+		}
+		if cookie.Name == auth.CSRFCookie {
+			csrfValue = cookie.Value
 		}
 	}
 	rec := httptest.NewRecorder()
@@ -128,8 +139,35 @@ func TestDashboardInjectsLanguageAndTranslations(t *testing.T) {
 			t.Fatalf("missing %q in dashboard:\n%s", expected, body)
 		}
 	}
-	if !strings.Contains(body, `href="/admin/chat"`) {
-		t.Fatalf("admin dashboard should expose chat from the top bar:\n%s", body)
+	assertAdminPWA(t, body)
+	if csrfValue == "" || !strings.Contains(body, `name="csrf" value="`+csrfValue+`"`) {
+		t.Fatal("admin logout form is missing its session-bound csrf token")
+	}
+	topbarStart := strings.Index(body, `<header class="topbar">`)
+	if topbarStart < 0 {
+		t.Fatal("dashboard is missing top bar")
+	}
+	topbarEnd := strings.Index(body[topbarStart:], `</header>`)
+	if topbarEnd < 0 {
+		t.Fatal("dashboard top bar is not closed")
+	}
+	topbar := body[topbarStart : topbarStart+topbarEnd]
+	if strings.Contains(topbar, `href="/admin/chat"`) {
+		t.Fatalf("admin top bar should not contain the moved chat entry:\n%s", topbar)
+	}
+	sideStart := strings.Index(body, `<aside class="side-nav"`)
+	if sideStart < 0 {
+		t.Fatal("dashboard is missing desktop navigation")
+	}
+	sideEnd := strings.Index(body[sideStart:], `</aside>`)
+	if sideEnd < 0 {
+		t.Fatal("dashboard desktop navigation is not closed")
+	}
+	sideNav := body[sideStart : sideStart+sideEnd]
+	chatIndex := strings.Index(sideNav, `href="/admin/chat"`)
+	overviewIndex := strings.Index(sideNav, `href="#overview"`)
+	if chatIndex < 0 || overviewIndex < 0 || chatIndex > overviewIndex || !strings.Contains(sideNav, `icons.svg#icon-chat`) {
+		t.Fatalf("desktop navigation should start with the dedicated chat entry:\n%s", sideNav)
 	}
 	for _, view := range []string{"overview", "api-addresses", "users", "providers", "mappings", "keys", "logs", "more"} {
 		if !strings.Contains(body, `data-admin-view="`+view+`"`) {
@@ -150,11 +188,19 @@ func TestDashboardInjectsLanguageAndTranslations(t *testing.T) {
 		t.Fatalf("dashboard mobile navigation is not closed")
 	}
 	mobileNav := body[mobileStart : mobileStart+mobileEnd]
-	if count := strings.Count(mobileNav, `data-nav-view=`); count != 5 {
+	if count := strings.Count(mobileNav, `<a class="nav-item`); count != 5 {
 		t.Fatalf("mobile navigation should have 5 entries, got %d", count)
 	}
-	if count := strings.Count(body, `class="more-nav-item"`); count != 3 {
-		t.Fatalf("more view should have 3 entries, got %d", count)
+	chatIndex = strings.Index(mobileNav, `href="/admin/chat"`)
+	overviewIndex = strings.Index(mobileNav, `href="#overview"`)
+	if chatIndex < 0 || overviewIndex < 0 || chatIndex > overviewIndex || strings.Contains(mobileNav, `href="#logs"`) {
+		t.Fatalf("mobile navigation should start with chat and move logs under more:\n%s", mobileNav)
+	}
+	if count := strings.Count(mobileNav, `data-nav-view=`); count != 4 {
+		t.Fatalf("mobile navigation should have 4 dashboard views plus chat, got %d dashboard views", count)
+	}
+	if count := strings.Count(body, `class="more-nav-item"`); count != 4 || !strings.Contains(body, `class="more-nav-item" href="#logs"`) {
+		t.Fatalf("more view should include the moved logs entry, got %d entries", count)
 	}
 	for _, legacyHash := range []string{"#api-addresses-section", "#users-section", "#providers-section", "#mappings-section", "#keys-section", "#logs-section"} {
 		if strings.Contains(body, `href="`+legacyHash+`"`) {
@@ -168,8 +214,23 @@ func TestDashboardInjectsLanguageAndTranslations(t *testing.T) {
 	}
 }
 
+func assertAdminPWA(t *testing.T, body string) {
+	t.Helper()
+	for _, expected := range []string{`rel="manifest" href="/admin/manifest.webmanifest"`, `name="theme-color" content="#101820"`, `src="/admin/static/pwa/register.js"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("admin page is missing PWA declaration %q:\n%s", expected, body)
+		}
+	}
+	if strings.Contains(body, `rel="manifest" href="/manifest.webmanifest"`) {
+		t.Fatalf("admin page should not use the consumer manifest:\n%s", body)
+	}
+}
+
 func TestAdminChatAPIRequiresSessionAndCSRF(t *testing.T) {
 	handler, router := testAdmin(t)
+	if _, err := handler.store.CreateProvider(context.Background(), store.ProviderInput{Name: "chat-test", Protocol: "openai", BaseAPI: "https://example.test/v1", APIKeyCipher: "cipher", DefaultModel: "model-a", Models: []string{"model-a"}, Enabled: true, IsDefault: true}); err != nil {
+		t.Fatal(err)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/admin/chat", nil)
 	rec := httptest.NewRecorder()
@@ -186,7 +247,7 @@ func TestAdminChatAPIRequiresSessionAndCSRF(t *testing.T) {
 	}
 
 	loginRecorder := httptest.NewRecorder()
-	if err := handler.sessions.Create(loginRecorder, 1, "admin"); err != nil {
+	if err := handler.sessions.Create(loginRecorder, httptest.NewRequest(http.MethodGet, "/admin", nil), 1); err != nil {
 		t.Fatal(err)
 	}
 	var cookies []*http.Cookie
@@ -206,26 +267,35 @@ func TestAdminChatAPIRequiresSessionAndCSRF(t *testing.T) {
 	}
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"models"`) || !strings.Contains(rec.Body.String(), `"default_system_prompt"`) || !strings.Contains(rec.Body.String(), `"max_tool_calls"`) {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"models"`) || !strings.Contains(rec.Body.String(), `"default_system_prompt"`) || !strings.Contains(rec.Body.String(), `"max_tool_calls"`) || !strings.Contains(rec.Body.String(), `"max_user_message_chars":131072`) {
 		t.Fatalf("unexpected chat models response: %d %s", rec.Code, rec.Body.String())
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/admin/chat", nil)
+	req.AddCookie(&http.Cookie{Name: langCookie, Value: "zh-CN"})
 	for _, cookie := range cookies {
 		req.AddCookie(cookie)
 	}
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	body := rec.Body.String()
-	for _, expected := range []string{`class="admin-page chat-page"`, `data-chat-root`, `data-chat-lang=`, `data-chat-api-prefix="/admin/api/chat"`, `data-chat-csrf-cookie="gateway_csrf"`, `data-chat-settings-writable="true"`, `data-chat-process-shell`, `data-chat-process-top`, `data-chat-process-bottom`, `data-chat-process-collapse`, `data-chat-process-reopen`, `data-chat-user-avatar`, `data-chat-assistant-avatar`, `data-chat-max-tool-calls`, `data-chat-default-system-prompt`, `data-chat-auto-title`, `chat/app.js`, `href="/admin"`} {
+	assertAdminPWA(t, body)
+	if !strings.Contains(body, `content="width=device-width, initial-scale=1, viewport-fit=cover"`) {
+		t.Fatalf("admin chat page should opt into safe-area viewport handling: %s", body)
+	}
+	if !strings.Contains(body, "一念通流 TokenFlow") {
+		t.Fatalf("admin chat page is missing the Chinese brand: %s", body)
+	}
+	for _, expected := range []string{`class="admin-page chat-page"`, `data-chat-root`, `data-chat-ready="false"`, `data-chat-lang=`, `data-chat-api-prefix="/admin/api/chat"`, `data-chat-csrf-cookie="gateway_csrf"`, `data-chat-settings-writable="true"`, `data-chat-sidebar`, `data-chat-sidebar-toggle`, `data-chat-conversation-search`, `data-chat-account-menu`, `data-chat-tools-menu`, `data-chat-process`, `data-chat-scroll-bottom`, `data-chat-user-avatar`, `data-chat-assistant-avatar`, `data-chat-max-tool-calls`, `data-chat-default-system-prompt`, `data-chat-auto-title`, `css/chat.css`, `chat/app.js`, `href="/admin"`} {
 		if rec.Code != http.StatusOK || !strings.Contains(body, expected) {
 			t.Fatalf("missing %q in admin chat page: status=%d body=%s", expected, rec.Code, body)
 		}
 	}
-	if strings.Contains(body, "admin/app.js") || strings.Contains(body, `id="providers-section"`) {
-		t.Fatalf("admin chat page should not render dashboard sections/scripts:\n%s", body)
+	for _, unexpected := range []string{"admin/app.js", `id="providers-section"`, `class="topbar"`, `data-chat-process-shell`, `data-chat-character-count`} {
+		if strings.Contains(body, unexpected) {
+			t.Fatalf("admin chat page should not render %q:\n%s", unexpected, body)
+		}
 	}
-
 	req = httptest.NewRequest(http.MethodPost, "/admin/api/chat/conversations", strings.NewReader(`{"title":"admin chat"}`))
 	req.Header.Set("Content-Type", "application/json")
 	for _, cookie := range cookies {
@@ -358,7 +428,7 @@ func TestAdminChatAPIRequiresSessionAndCSRF(t *testing.T) {
 func TestKeysAPIIncludesCacheStatsAndResetsKey(t *testing.T) {
 	handler, router := testAdmin(t)
 	loginRecorder := httptest.NewRecorder()
-	if err := handler.sessions.Create(loginRecorder, 1, "admin"); err != nil {
+	if err := handler.sessions.Create(loginRecorder, httptest.NewRequest(http.MethodGet, "/admin", nil), 1); err != nil {
 		t.Fatal(err)
 	}
 	var cookies []*http.Cookie
@@ -478,7 +548,7 @@ func TestKeysAPIIncludesCacheStatsAndResetsKey(t *testing.T) {
 func TestLogsAPIReturnsPaginationAndCacheFields(t *testing.T) {
 	handler, router := testAdmin(t)
 	loginRecorder := httptest.NewRecorder()
-	if err := handler.sessions.Create(loginRecorder, 1, "admin"); err != nil {
+	if err := handler.sessions.Create(loginRecorder, httptest.NewRequest(http.MethodGet, "/admin", nil), 1); err != nil {
 		t.Fatal(err)
 	}
 	key, err := handler.store.CreateDistributionKey(context.Background(), "client-key", "sk-client", "hash-client")
@@ -561,7 +631,7 @@ func TestLogsAPIReturnsPaginationAndCacheFields(t *testing.T) {
 func TestLogsAPISearchesModelProviderAndKey(t *testing.T) {
 	handler, router := testAdmin(t)
 	loginRecorder := httptest.NewRecorder()
-	if err := handler.sessions.Create(loginRecorder, 1, "admin"); err != nil {
+	if err := handler.sessions.Create(loginRecorder, httptest.NewRequest(http.MethodGet, "/admin", nil), 1); err != nil {
 		t.Fatal(err)
 	}
 	provider, err := handler.store.CreateProvider(context.Background(), store.ProviderInput{
@@ -636,7 +706,7 @@ func TestLogsAPISearchesModelProviderAndKey(t *testing.T) {
 func TestTokenUsageAPI(t *testing.T) {
 	handler, router := testAdmin(t)
 	loginRecorder := httptest.NewRecorder()
-	if err := handler.sessions.Create(loginRecorder, 1, "admin"); err != nil {
+	if err := handler.sessions.Create(loginRecorder, httptest.NewRequest(http.MethodGet, "/admin", nil), 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := handler.store.InsertRequestLog(context.Background(), store.RequestLog{
@@ -716,7 +786,7 @@ func TestTokenUsageAPI(t *testing.T) {
 func TestModelTokenDetailsAPI(t *testing.T) {
 	handler, router := testAdmin(t)
 	loginRecorder := httptest.NewRecorder()
-	if err := handler.sessions.Create(loginRecorder, 1, "admin"); err != nil {
+	if err := handler.sessions.Create(loginRecorder, httptest.NewRequest(http.MethodGet, "/admin", nil), 1); err != nil {
 		t.Fatal(err)
 	}
 	provider, err := handler.store.CreateProvider(context.Background(), store.ProviderInput{
@@ -818,7 +888,7 @@ func TestModelTokenDetailsAPI(t *testing.T) {
 func TestProviderModelPricesAPI(t *testing.T) {
 	handler, router := testAdmin(t)
 	loginRecorder := httptest.NewRecorder()
-	if err := handler.sessions.Create(loginRecorder, 1, "admin"); err != nil {
+	if err := handler.sessions.Create(loginRecorder, httptest.NewRequest(http.MethodGet, "/admin", nil), 1); err != nil {
 		t.Fatal(err)
 	}
 	var cookies []*http.Cookie
@@ -893,7 +963,7 @@ func TestProviderModelPricesAPI(t *testing.T) {
 func TestUsersAPIAndUserModelDetails(t *testing.T) {
 	handler, router := testAdmin(t)
 	loginRecorder := httptest.NewRecorder()
-	if err := handler.sessions.Create(loginRecorder, 1, "admin"); err != nil {
+	if err := handler.sessions.Create(loginRecorder, httptest.NewRequest(http.MethodGet, "/admin", nil), 1); err != nil {
 		t.Fatal(err)
 	}
 	var cookies []*http.Cookie
@@ -1027,6 +1097,66 @@ func sumUsagePoints(points []store.TokenUsagePoint) (requests, inputTokens, outp
 		cacheCreationTokens += point.CacheCreationTokens
 	}
 	return requests, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens
+}
+
+func TestAdminLogoutRequiresCSRFAndRevokesAllDevices(t *testing.T) {
+	handler, router := testAdmin(t)
+	firstRec := httptest.NewRecorder()
+	if err := handler.sessions.Create(firstRec, httptest.NewRequest(http.MethodGet, "/admin", nil), 1); err != nil {
+		t.Fatal(err)
+	}
+	firstCookies, firstCSRF := adminSessionCookies(firstRec)
+	secondRec := httptest.NewRecorder()
+	if err := handler.sessions.Create(secondRec, httptest.NewRequest(http.MethodGet, "/admin", nil), 1); err != nil {
+		t.Fatal(err)
+	}
+	secondCookies, _ := adminSessionCookies(secondRec)
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/logout", nil)
+	for _, cookie := range firstCookies {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("logout without csrf should be rejected: %d %s", rec.Code, rec.Body.String())
+	}
+
+	form := url.Values{"csrf": {firstCSRF}}
+	req = httptest.NewRequest(http.MethodPost, "/admin/logout", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	for _, cookie := range firstCookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/admin/login" {
+		t.Fatalf("valid logout should redirect: %d %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/admin/api/stats", nil)
+	for _, cookie := range secondCookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("second admin device should be revoked after logout: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func adminSessionCookies(rec *httptest.ResponseRecorder) ([]*http.Cookie, string) {
+	var cookies []*http.Cookie
+	csrf := ""
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name == auth.SessionCookie || cookie.Name == auth.CSRFCookie {
+			cookies = append(cookies, cookie)
+		}
+		if cookie.Name == auth.CSRFCookie {
+			csrf = cookie.Value
+		}
+	}
+	return cookies, csrf
 }
 
 func testAdmin(t *testing.T) (*Handler, chi.Router) {
