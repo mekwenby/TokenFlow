@@ -134,7 +134,7 @@ func TestDashboardInjectsLanguageAndTranslations(t *testing.T) {
 		t.Fatalf("unexpected status: %d", rec.Code)
 	}
 	body := rec.Body.String()
-	for _, expected := range []string{`<html lang="zh-CN">`, "TokenFlow", "tokenflow-logo.svg", "icons.svg", "admin/app.js", "上游供应商", "支持模型", "用户", `id="api-addresses"`, `id="token-usage"`, `id="detail-modal"`, `id="logs-search-form"`, `id="keys-fullscreen-toggle"`, `id="logs-fullscreen-toggle"`, `data-action="toggle-keys-fullscreen"`, `data-action="toggle-logs-fullscreen"`, `window.__ADMIN_LANG__ = "zh-CN"`, `"requests":"请求数"`, `"api_addresses":"API 地址"`, `"token_usage":"Token 使用趋势"`, `"model_token_details":"模型 Token 明细"`, `"detail_scope_user":"用户"`, `"active_users":"启用用户"`, `"pending_users":"待审核用户"`, `"logs_search":"搜索请求"`, `"fullscreen":"全屏显示"`, `"exit_fullscreen":"退出全屏"`, `"cache_hit_rate":"缓存命中率"`, `"previous_page":"上一页"`, `"next_page":"下一页"`, `"reset_key":"重新生成"`, `"reset_key_stats":"重置统计"`, `"distribution_key":"Key 名称"`, `"copy":"复制"`, `"copied":"已复制"`, `"more":"更多"`, `"admin_navigation":"管理后台分区"`} {
+	for _, expected := range []string{`<html lang="zh-CN">`, "TokenFlow", "tokenflow-logo.png", "icons.svg", "admin/app.js", "上游供应商", "支持模型", "用户", `id="api-addresses"`, `id="token-usage"`, `id="detail-modal"`, `id="logs-search-form"`, `id="keys-fullscreen-toggle"`, `id="logs-fullscreen-toggle"`, `data-action="toggle-keys-fullscreen"`, `data-action="toggle-logs-fullscreen"`, `window.__ADMIN_LANG__ = "zh-CN"`, `"requests":"请求数"`, `"api_addresses":"API 地址"`, `"token_usage":"Token 使用趋势"`, `"model_token_details":"模型 Token 明细"`, `"detail_scope_user":"用户"`, `"active_users":"启用用户"`, `"pending_users":"待审核用户"`, `"logs_search":"搜索请求"`, `"fullscreen":"全屏显示"`, `"exit_fullscreen":"退出全屏"`, `"cache_hit_rate":"缓存命中率"`, `"previous_page":"上一页"`, `"next_page":"下一页"`, `"reset_key":"重新生成"`, `"reset_key_stats":"重置统计"`, `"distribution_key":"Key 名称"`, `"copy":"复制"`, `"copied":"已复制"`, `"more":"更多"`, `"admin_navigation":"管理后台分区"`} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("missing %q in dashboard:\n%s", expected, body)
 		}
@@ -267,7 +267,7 @@ func TestAdminChatAPIRequiresSessionAndCSRF(t *testing.T) {
 	}
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"models"`) || !strings.Contains(rec.Body.String(), `"default_system_prompt"`) || !strings.Contains(rec.Body.String(), `"max_tool_calls"`) || !strings.Contains(rec.Body.String(), `"max_user_message_chars":131072`) {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"models"`) || !strings.Contains(rec.Body.String(), `"default_system_prompt"`) || !strings.Contains(rec.Body.String(), `"max_tool_calls":7`) || !strings.Contains(rec.Body.String(), `"max_user_message_chars":131072`) {
 		t.Fatalf("unexpected chat models response: %d %s", rec.Code, rec.Body.String())
 	}
 
@@ -286,7 +286,7 @@ func TestAdminChatAPIRequiresSessionAndCSRF(t *testing.T) {
 	if !strings.Contains(body, "一念通流 TokenFlow") {
 		t.Fatalf("admin chat page is missing the Chinese brand: %s", body)
 	}
-	for _, expected := range []string{`class="admin-page chat-page"`, `data-chat-root`, `data-chat-ready="false"`, `data-chat-lang=`, `data-chat-api-prefix="/admin/api/chat"`, `data-chat-csrf-cookie="gateway_csrf"`, `data-chat-settings-writable="true"`, `data-chat-sidebar`, `data-chat-sidebar-toggle`, `data-chat-conversation-search`, `data-chat-account-menu`, `data-chat-tools-menu`, `data-chat-process`, `data-chat-scroll-bottom`, `data-chat-user-avatar`, `data-chat-assistant-avatar`, `data-chat-max-tool-calls`, `data-chat-default-system-prompt`, `data-chat-auto-title`, `css/chat.css`, `chat/app.js`, `href="/admin"`} {
+	for _, expected := range []string{`class="admin-page chat-page"`, `data-chat-root`, `data-chat-ready="false"`, `data-chat-lang=`, `data-chat-api-prefix="/admin/api/chat"`, `data-chat-csrf-cookie="gateway_csrf"`, `data-chat-sidebar`, `data-chat-sidebar-toggle`, `data-chat-conversation-search`, `data-chat-account-menu`, `data-chat-tools-menu`, `data-chat-process`, `data-chat-scroll-bottom`, `data-chat-user-avatar`, `data-chat-assistant-avatar`, `data-chat-max-tool-calls`, `value="7"`, `data-chat-default-system-prompt`, `data-chat-auto-title`, `css/chat.css`, `chat/app.js`, `href="/admin"`} {
 		if rec.Code != http.StatusOK || !strings.Contains(body, expected) {
 			t.Fatalf("missing %q in admin chat page: status=%d body=%s", expected, rec.Code, body)
 		}
@@ -307,40 +307,7 @@ func TestAdminChatAPIRequiresSessionAndCSRF(t *testing.T) {
 		t.Fatalf("chat conversation create without CSRF should fail: %d %s", rec.Code, rec.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/admin/api/chat/settings", nil)
-	for _, cookie := range cookies {
-		req.AddCookie(cookie)
-	}
-	rec = httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"max_tool_calls":6`) {
-		t.Fatalf("unexpected chat settings response: %d %s", rec.Code, rec.Body.String())
-	}
-
-	req = httptest.NewRequest(http.MethodPatch, "/admin/api/chat/settings", strings.NewReader(`{"max_tool_calls":8}`))
-	req.Header.Set("Content-Type", "application/json")
-	for _, cookie := range cookies {
-		req.AddCookie(cookie)
-	}
-	rec = httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("chat settings patch without CSRF should fail: %d %s", rec.Code, rec.Body.String())
-	}
-
-	req = httptest.NewRequest(http.MethodPatch, "/admin/api/chat/settings", strings.NewReader(`{"max_tool_calls":8}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-CSRF-Token", csrf)
-	for _, cookie := range cookies {
-		req.AddCookie(cookie)
-	}
-	rec = httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"max_tool_calls":8`) {
-		t.Fatalf("unexpected chat settings patch response: %d %s", rec.Code, rec.Body.String())
-	}
-
-	req = httptest.NewRequest(http.MethodPost, "/admin/api/chat/conversations", strings.NewReader(`{"title":"admin chat","model":"model-a","thinking_effort":"high","system_prompt":"Use tables.","nickname":"Mek","user_avatar":"😎","assistant_avatar":"🧭"}`))
+	req = httptest.NewRequest(http.MethodPost, "/admin/api/chat/conversations", strings.NewReader(`{"title":"admin chat","model":"model-a","thinking_effort":"high","system_prompt":"Use tables.","nickname":"Mek","user_avatar":"😎","assistant_avatar":"🧭","max_tool_calls":8}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-CSRF-Token", csrf)
 	for _, cookie := range cookies {
@@ -355,11 +322,11 @@ func TestAdminChatAPIRequiresSessionAndCSRF(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &conv); err != nil {
 		t.Fatal(err)
 	}
-	if conv.AdminUserID == nil || *conv.AdminUserID != 1 || conv.ConsumerUserID != nil || conv.ThinkingEffort != "high" || conv.SystemPrompt != "Use tables." || conv.Nickname != "Mek" || conv.UserAvatar != "😎" || conv.AssistantAvatar != "🧭" {
+	if conv.AdminUserID == nil || *conv.AdminUserID != 1 || conv.ConsumerUserID != nil || conv.ThinkingEffort != "high" || conv.SystemPrompt != "Use tables." || conv.Nickname != "Mek" || conv.UserAvatar != "😎" || conv.AssistantAvatar != "🧭" || conv.MaxToolCalls != 8 {
 		t.Fatalf("conversation was not scoped to admin user: %#v", conv)
 	}
 
-	req = httptest.NewRequest(http.MethodPatch, "/admin/api/chat/conversations/"+strconv.FormatInt(conv.ID, 10), strings.NewReader(`{"model":"model-a","thinking_effort":"off","system_prompt":"Be brief.","nickname":"Operator","user_avatar":"","assistant_avatar":"📚"}`))
+	req = httptest.NewRequest(http.MethodPatch, "/admin/api/chat/conversations/"+strconv.FormatInt(conv.ID, 10), strings.NewReader(`{"model":"model-a","thinking_effort":"off","system_prompt":"Be brief.","nickname":"Operator","user_avatar":"","assistant_avatar":"📚","max_tool_calls":20}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-CSRF-Token", csrf)
 	for _, cookie := range cookies {
@@ -373,8 +340,20 @@ func TestAdminChatAPIRequiresSessionAndCSRF(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &conv); err != nil {
 		t.Fatal(err)
 	}
-	if conv.ThinkingEffort != "off" || conv.SystemPrompt != "Be brief." || conv.Nickname != "Operator" || conv.UserAvatar != "😀" || conv.AssistantAvatar != "📚" {
+	if conv.ThinkingEffort != "off" || conv.SystemPrompt != "Be brief." || conv.Nickname != "Operator" || conv.UserAvatar != "😀" || conv.AssistantAvatar != "📚" || conv.MaxToolCalls != 20 {
 		t.Fatalf("conversation settings were not patched: %#v", conv)
+	}
+
+	req = httptest.NewRequest(http.MethodPatch, "/admin/api/chat/conversations/"+strconv.FormatInt(conv.ID, 10), strings.NewReader(`{"max_tool_calls":21}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid conversation max tool calls should fail: %d %s", rec.Code, rec.Body.String())
 	}
 
 	cipher, err := handler.box.Encrypt("upstream-key")

@@ -69,6 +69,18 @@ type AuthSession struct {
 	ExpiresAt     time.Time
 }
 
+type MobileSession struct {
+	ID             int64
+	ConsumerUserID int64
+	Email          string
+	UserStatus     string
+	TokenHash      string
+	DeviceName     string
+	CreatedAt      time.Time
+	LastUsedAt     time.Time
+	ExpiresAt      time.Time
+}
+
 type Provider struct {
 	ID              int64      `json:"id"`
 	Name            string     `json:"name"`
@@ -189,6 +201,7 @@ type ChatConversation struct {
 	Nickname                       string     `json:"nickname"`
 	UserAvatar                     string     `json:"user_avatar"`
 	AssistantAvatar                string     `json:"assistant_avatar"`
+	MaxToolCalls                   int        `json:"max_tool_calls"`
 	ActiveOperation                string     `json:"active_operation"`
 	ActiveStartedAt                *time.Time `json:"active_operation_started_at,omitempty"`
 	Status                         string     `json:"status"`
@@ -320,7 +333,7 @@ var (
 )
 
 const (
-	DefaultChatMaxToolCalls = 6
+	DefaultChatMaxToolCalls = 7
 	MaxChatMaxToolCalls     = 20
 )
 
@@ -385,6 +398,15 @@ func (s *Store) Migrate(ctx context.Context) error {
 				(owner_type = 'consumer' AND consumer_user_id IS NOT NULL AND admin_user_id IS NULL) OR
 				(owner_type = 'admin' AND admin_user_id IS NOT NULL AND consumer_user_id IS NULL)
 			)
+		)`,
+		`CREATE TABLE IF NOT EXISTS mobile_sessions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			consumer_user_id INTEGER NOT NULL REFERENCES consumer_users(id) ON DELETE CASCADE,
+			token_hash TEXT NOT NULL UNIQUE,
+			device_name TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			last_used_at TEXT NOT NULL,
+			expires_at TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS providers (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -456,11 +478,6 @@ func (s *Store) Migrate(ctx context.Context) error {
 			tool_calls INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
-		`CREATE TABLE IF NOT EXISTS app_settings (
-			key TEXT PRIMARY KEY,
-			value TEXT NOT NULL DEFAULT '',
-			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-		)`,
 		`CREATE TABLE IF NOT EXISTS chat_conversations (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			owner_type TEXT NOT NULL CHECK(owner_type IN ('consumer', 'admin')),
@@ -474,6 +491,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 			nickname TEXT NOT NULL DEFAULT '',
 			user_avatar TEXT NOT NULL DEFAULT '😀',
 			assistant_avatar TEXT NOT NULL DEFAULT '🤖',
+			max_tool_calls INTEGER NOT NULL DEFAULT 7 CHECK(max_tool_calls BETWEEN 0 AND 20),
 			active_operation TEXT NOT NULL DEFAULT '',
 			active_operation_started_at TEXT,
 			status TEXT NOT NULL DEFAULT 'idle',
@@ -504,6 +522,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_auth_sessions_consumer ON auth_sessions(consumer_user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_auth_sessions_admin ON auth_sessions(admin_user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_mobile_sessions_consumer ON mobile_sessions(consumer_user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_mobile_sessions_expires_at ON mobile_sessions(expires_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_chat_conversations_consumer ON chat_conversations(consumer_user_id, updated_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_chat_conversations_admin ON chat_conversations(admin_user_id, updated_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation ON chat_messages(conversation_id, id ASC)`,
@@ -529,9 +549,6 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureChatMessageLifecycleColumns(ctx); err != nil {
-		return err
-	}
-	if err := s.ensureAppSettingsDefaults(ctx); err != nil {
 		return err
 	}
 	return nil
@@ -652,6 +669,11 @@ func (s *Store) ensureChatConversationSettingsColumns(ctx context.Context) error
 			return err
 		}
 	}
+	if !columns["max_tool_calls"] {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE chat_conversations ADD COLUMN max_tool_calls INTEGER NOT NULL DEFAULT 7 CHECK(max_tool_calls BETWEEN 0 AND 20)`); err != nil {
+			return err
+		}
+	}
 	if !columns["active_operation"] {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE chat_conversations ADD COLUMN active_operation TEXT NOT NULL DEFAULT ''`); err != nil {
 			return err
@@ -688,11 +710,6 @@ func (s *Store) ensureChatConversationSettingsColumns(ctx context.Context) error
 		}
 	}
 	return nil
-}
-
-func (s *Store) ensureAppSettingsDefaults(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO app_settings(key, value) VALUES('chat.max_tool_calls', ?)`, fmt.Sprint(DefaultChatMaxToolCalls))
-	return err
 }
 
 func (s *Store) ensureDistributionKeyConsumerColumn(ctx context.Context) error {
@@ -1084,6 +1101,95 @@ func (s *Store) DeleteExpiredAuthSessions(ctx context.Context, now time.Time) er
 	return err
 }
 
+func (s *Store) CreateMobileSession(ctx context.Context, session MobileSession) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO mobile_sessions(
+		consumer_user_id, token_hash, device_name, created_at, last_used_at, expires_at
+	) VALUES(?, ?, ?, ?, ?, ?)`,
+		session.ConsumerUserID,
+		session.TokenHash,
+		strings.TrimSpace(session.DeviceName),
+		formatAuthSessionTime(session.CreatedAt),
+		formatAuthSessionTime(session.LastUsedAt),
+		formatAuthSessionTime(session.ExpiresAt),
+	)
+	return err
+}
+
+func (s *Store) MobileSessionByTokenHash(ctx context.Context, tokenHash string) (MobileSession, error) {
+	var session MobileSession
+	var createdAt, lastUsedAt, expiresAt string
+	err := s.db.QueryRowContext(ctx, `SELECT
+		s.id,
+		s.consumer_user_id,
+		c.email,
+		c.status,
+		s.token_hash,
+		s.device_name,
+		s.created_at,
+		s.last_used_at,
+		s.expires_at
+		FROM mobile_sessions s
+		JOIN consumer_users c ON c.id = s.consumer_user_id
+		WHERE s.token_hash = ?`, strings.TrimSpace(tokenHash)).Scan(
+		&session.ID,
+		&session.ConsumerUserID,
+		&session.Email,
+		&session.UserStatus,
+		&session.TokenHash,
+		&session.DeviceName,
+		&createdAt,
+		&lastUsedAt,
+		&expiresAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return session, ErrNotFound
+	}
+	if err != nil {
+		return session, err
+	}
+	session.CreatedAt = parseDBTime(createdAt)
+	session.LastUsedAt = parseDBTime(lastUsedAt)
+	session.ExpiresAt = parseDBTime(expiresAt)
+	return session, nil
+}
+
+func (s *Store) RenewMobileSession(ctx context.Context, tokenHash string, now, expiresAt time.Time) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE mobile_sessions
+		SET last_used_at = ?, expires_at = ?
+		WHERE token_hash = ? AND expires_at > ?`,
+		formatAuthSessionTime(now),
+		formatAuthSessionTime(expiresAt),
+		strings.TrimSpace(tokenHash),
+		formatAuthSessionTime(now),
+	)
+	if err != nil {
+		return err
+	}
+	updated, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) DeleteMobileSessionByTokenHash(ctx context.Context, tokenHash string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM mobile_sessions WHERE token_hash = ?`, strings.TrimSpace(tokenHash))
+	return err
+}
+
+func (s *Store) RevokeMobileSessions(ctx context.Context, consumerUserID int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM mobile_sessions WHERE consumer_user_id = ?`, consumerUserID)
+	return err
+}
+
+func (s *Store) DeleteExpiredMobileSessions(ctx context.Context, now time.Time) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM mobile_sessions WHERE expires_at <= ?`, formatAuthSessionTime(now))
+	return err
+}
+
 func formatAuthSessionTime(value time.Time) string {
 	return value.UTC().Format("2006-01-02T15:04:05.000000000Z07:00")
 }
@@ -1177,6 +1283,9 @@ func (s *Store) UpdateConsumerUser(ctx context.Context, id int64, status string,
 	}
 	if status == ConsumerStatusDisabled {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM auth_sessions WHERE owner_type = ? AND consumer_user_id = ?`, AuthSessionOwnerConsumer, id); err != nil {
+			return ConsumerUser{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM mobile_sessions WHERE consumer_user_id = ?`, id); err != nil {
 			return ConsumerUser{}, err
 		}
 	}
@@ -2044,44 +2153,12 @@ func (s *Store) ConsumerLogCountSearch(ctx context.Context, consumerUserID int64
 	return total, err
 }
 
-func (s *Store) ChatMaxToolCalls(ctx context.Context) (int, error) {
-	var value string
-	err := s.db.QueryRowContext(ctx, `SELECT value FROM app_settings WHERE key = 'chat.max_tool_calls'`).Scan(&value)
-	if errors.Is(err, sql.ErrNoRows) {
-		return DefaultChatMaxToolCalls, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	var out int
-	if _, err := fmt.Sscanf(strings.TrimSpace(value), "%d", &out); err != nil {
-		return DefaultChatMaxToolCalls, nil
-	}
-	if out < 0 || out > MaxChatMaxToolCalls {
-		return DefaultChatMaxToolCalls, nil
-	}
-	return out, nil
-}
-
-func (s *Store) UpdateChatMaxToolCalls(ctx context.Context, value int) (int, error) {
-	if value < 0 || value > MaxChatMaxToolCalls {
-		return 0, ErrInvalidChatMaxToolCalls
-	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO app_settings(key, value, updated_at)
-		VALUES('chat.max_tool_calls', ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`, fmt.Sprint(value))
-	if err != nil {
-		return 0, err
-	}
-	return value, nil
-}
-
 func (s *Store) ListChatConversations(ctx context.Context, owner ChatOwner) ([]ChatConversation, error) {
 	where, args, err := chatOwnerWhere("c", owner)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT c.id, c.owner_type, c.consumer_user_id, c.admin_user_id, c.title, c.title_auto_generated, c.model, c.thinking_effort, c.system_prompt, c.nickname, c.user_avatar, c.assistant_avatar, c.active_operation, c.active_operation_started_at, c.status, c.status_message, c.status_updated_at, c.created_at, c.updated_at, c.last_message_at, c.context_summary, c.context_summary_through_message_id
+	rows, err := s.db.QueryContext(ctx, `SELECT c.id, c.owner_type, c.consumer_user_id, c.admin_user_id, c.title, c.title_auto_generated, c.model, c.thinking_effort, c.system_prompt, c.nickname, c.user_avatar, c.assistant_avatar, c.max_tool_calls, c.active_operation, c.active_operation_started_at, c.status, c.status_message, c.status_updated_at, c.created_at, c.updated_at, c.last_message_at, c.context_summary, c.context_summary_through_message_id
 		FROM chat_conversations c
 		WHERE `+where+`
 		ORDER BY COALESCE(c.last_message_at, c.updated_at) DESC, c.updated_at DESC, c.id DESC`, args...)
@@ -2103,7 +2180,7 @@ func (s *Store) ListChatConversations(ctx context.Context, owner ChatOwner) ([]C
 	return conversations, rows.Err()
 }
 
-func (s *Store) CreateChatConversation(ctx context.Context, owner ChatOwner, title, model, thinkingEffort, systemPrompt, nickname, userAvatar, assistantAvatar string) (ChatConversation, error) {
+func (s *Store) CreateChatConversation(ctx context.Context, owner ChatOwner, title, model, thinkingEffort, systemPrompt, nickname, userAvatar, assistantAvatar string, maxToolCalls int) (ChatConversation, error) {
 	if _, _, err := chatOwnerWhere("c", owner); err != nil {
 		return ChatConversation{}, err
 	}
@@ -2115,6 +2192,9 @@ func (s *Store) CreateChatConversation(ctx context.Context, owner ChatOwner, tit
 	nickname = NormalizeChatNickname(nickname)
 	userAvatar = NormalizeChatUserAvatar(userAvatar)
 	assistantAvatar = NormalizeChatAssistantAvatar(assistantAvatar)
+	if maxToolCalls < 0 || maxToolCalls > MaxChatMaxToolCalls {
+		return ChatConversation{}, ErrInvalidChatMaxToolCalls
+	}
 	var consumerUserID any
 	var adminUserID any
 	switch owner.Type {
@@ -2125,8 +2205,8 @@ func (s *Store) CreateChatConversation(ctx context.Context, owner ChatOwner, tit
 	default:
 		return ChatConversation{}, ErrNotFound
 	}
-	res, err := s.db.ExecContext(ctx, `INSERT INTO chat_conversations(owner_type, consumer_user_id, admin_user_id, title, title_auto_generated, model, thinking_effort, system_prompt, nickname, user_avatar, assistant_avatar)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, owner.Type, consumerUserID, adminUserID, title, boolInt(titleAutoGenerated), model, thinkingEffort, systemPrompt, nickname, userAvatar, assistantAvatar)
+	res, err := s.db.ExecContext(ctx, `INSERT INTO chat_conversations(owner_type, consumer_user_id, admin_user_id, title, title_auto_generated, model, thinking_effort, system_prompt, nickname, user_avatar, assistant_avatar, max_tool_calls)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, owner.Type, consumerUserID, adminUserID, title, boolInt(titleAutoGenerated), model, thinkingEffort, systemPrompt, nickname, userAvatar, assistantAvatar, maxToolCalls)
 	if err != nil {
 		return ChatConversation{}, err
 	}
@@ -2146,7 +2226,7 @@ func (s *Store) ChatConversation(ctx context.Context, owner ChatOwner, id int64)
 		return ChatConversation{}, err
 	}
 	args = append([]any{id}, args...)
-	row := s.db.QueryRowContext(ctx, `SELECT c.id, c.owner_type, c.consumer_user_id, c.admin_user_id, c.title, c.title_auto_generated, c.model, c.thinking_effort, c.system_prompt, c.nickname, c.user_avatar, c.assistant_avatar, c.active_operation, c.active_operation_started_at, c.status, c.status_message, c.status_updated_at, c.created_at, c.updated_at, c.last_message_at, c.context_summary, c.context_summary_through_message_id
+	row := s.db.QueryRowContext(ctx, `SELECT c.id, c.owner_type, c.consumer_user_id, c.admin_user_id, c.title, c.title_auto_generated, c.model, c.thinking_effort, c.system_prompt, c.nickname, c.user_avatar, c.assistant_avatar, c.max_tool_calls, c.active_operation, c.active_operation_started_at, c.status, c.status_message, c.status_updated_at, c.created_at, c.updated_at, c.last_message_at, c.context_summary, c.context_summary_through_message_id
 		FROM chat_conversations c
 		WHERE c.id = ? AND `+where, args...)
 	conv, err := scanChatConversation(row)
@@ -2156,7 +2236,7 @@ func (s *Store) ChatConversation(ctx context.Context, owner ChatOwner, id int64)
 	return conv, err
 }
 
-func (s *Store) UpdateChatConversation(ctx context.Context, owner ChatOwner, id int64, title, model, thinkingEffort, systemPrompt, nickname, userAvatar, assistantAvatar *string) (ChatConversation, error) {
+func (s *Store) UpdateChatConversation(ctx context.Context, owner ChatOwner, id int64, title, model, thinkingEffort, systemPrompt, nickname, userAvatar, assistantAvatar *string, maxToolCalls *int) (ChatConversation, error) {
 	conv, err := s.ChatConversation(ctx, owner, id)
 	if err != nil {
 		return ChatConversation{}, err
@@ -2186,13 +2266,19 @@ func (s *Store) UpdateChatConversation(ctx context.Context, owner ChatOwner, id 
 	if assistantAvatar != nil {
 		conv.AssistantAvatar = NormalizeChatAssistantAvatar(*assistantAvatar)
 	}
+	if maxToolCalls != nil {
+		if *maxToolCalls < 0 || *maxToolCalls > MaxChatMaxToolCalls {
+			return ChatConversation{}, ErrInvalidChatMaxToolCalls
+		}
+		conv.MaxToolCalls = *maxToolCalls
+	}
 	where, args, err := chatOwnerWhere("", owner)
 	if err != nil {
 		return ChatConversation{}, err
 	}
-	args = append([]any{conv.Title, boolInt(conv.TitleAutoGenerated), conv.Model, conv.ThinkingEffort, conv.SystemPrompt, conv.Nickname, conv.UserAvatar, conv.AssistantAvatar, id}, args...)
+	args = append([]any{conv.Title, boolInt(conv.TitleAutoGenerated), conv.Model, conv.ThinkingEffort, conv.SystemPrompt, conv.Nickname, conv.UserAvatar, conv.AssistantAvatar, conv.MaxToolCalls, id}, args...)
 	res, err := s.db.ExecContext(ctx, `UPDATE chat_conversations
-		SET title = ?, title_auto_generated = ?, model = ?, thinking_effort = ?, system_prompt = ?, nickname = ?, user_avatar = ?, assistant_avatar = ?, updated_at = CURRENT_TIMESTAMP
+		SET title = ?, title_auto_generated = ?, model = ?, thinking_effort = ?, system_prompt = ?, nickname = ?, user_avatar = ?, assistant_avatar = ?, max_tool_calls = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ? AND `+where+` AND COALESCE(active_operation, '') = ''`, args...)
 	if err != nil {
 		return ChatConversation{}, err
@@ -3066,7 +3152,7 @@ func scanChatConversation(row scanner) (ChatConversation, error) {
 	var titleAutoGenerated int
 	var createdAt, updatedAt string
 	var activeStartedAt, statusUpdatedAt, lastMessageAt sql.NullString
-	err := row.Scan(&conv.ID, &conv.OwnerType, &consumerUserID, &adminUserID, &conv.Title, &titleAutoGenerated, &conv.Model, &conv.ThinkingEffort, &conv.SystemPrompt, &conv.Nickname, &conv.UserAvatar, &conv.AssistantAvatar, &conv.ActiveOperation, &activeStartedAt, &conv.Status, &conv.StatusMessage, &statusUpdatedAt, &createdAt, &updatedAt, &lastMessageAt, &conv.ContextSummary, &conv.ContextSummaryThroughMessageID)
+	err := row.Scan(&conv.ID, &conv.OwnerType, &consumerUserID, &adminUserID, &conv.Title, &titleAutoGenerated, &conv.Model, &conv.ThinkingEffort, &conv.SystemPrompt, &conv.Nickname, &conv.UserAvatar, &conv.AssistantAvatar, &conv.MaxToolCalls, &conv.ActiveOperation, &activeStartedAt, &conv.Status, &conv.StatusMessage, &statusUpdatedAt, &createdAt, &updatedAt, &lastMessageAt, &conv.ContextSummary, &conv.ContextSummaryThroughMessageID)
 	if err != nil {
 		return ChatConversation{}, err
 	}

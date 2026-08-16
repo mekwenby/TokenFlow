@@ -73,7 +73,7 @@ test("chat viewport follows the iOS keyboard and clears stale offsets after it c
 });
 
 test("tool call limits are normalized to the server range", () => {
-  assert.equal(normalizeMaxToolCalls("bad"), 6);
+  assert.equal(normalizeMaxToolCalls("bad"), 7);
   assert.equal(normalizeMaxToolCalls(-4), 0);
   assert.equal(normalizeMaxToolCalls(99), 20);
 });

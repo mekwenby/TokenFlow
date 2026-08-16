@@ -148,12 +148,11 @@ func (h *Handler) Register(r chi.Router) {
 		r.Get("/admin/api/model-token-details", h.modelTokenDetails)
 		r.Get("/admin/api/logs", h.logs)
 		chat.RegisterRoutes(r, chat.RouteConfig{
-			BasePath:         "/admin/api/chat",
-			Service:          h.chatService,
-			Store:            h.store,
-			Owner:            h.chatOwner,
-			RequireCSRF:      h.requireCSRFForWrite,
-			SettingsWritable: true,
+			BasePath:    "/admin/api/chat",
+			Service:     h.chatService,
+			Store:       h.store,
+			Owner:       h.chatOwner,
+			RequireCSRF: h.requireCSRFForWrite,
 		})
 	})
 }
@@ -704,7 +703,7 @@ const templates = `
 {{define "login"}}
 <!doctype html>
 <html lang="{{.Lang}}">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><link rel="icon" href="/admin/static/tokenflow-logo.svg"><link rel="stylesheet" href="/admin/static/css/tokens.css">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><link rel="icon" type="image/png" href="/admin/static/tokenflow-logo.png"><link rel="stylesheet" href="/admin/static/css/tokens.css">
   {{template "admin_pwa_head" .}}
   <link rel="stylesheet" href="/admin/static/css/base.css">
   <link rel="stylesheet" href="/admin/static/css/components.css">
@@ -714,7 +713,7 @@ const templates = `
 <body class="auth-page">
   <main class="auth-card">
     <div class="auth-head">
-      <h1 class="brand"><img src="/admin/static/tokenflow-logo.svg" alt="" aria-hidden="true"><span>{{tr .Lang "app.title"}}</span></h1>
+      <h1 class="brand"><img src="/admin/static/tokenflow-logo.png" alt="" aria-hidden="true"><span>{{tr .Lang "app.title"}}</span></h1>
       {{template "lang_switch" .}}
     </div>
     <form method="post" action="/admin/login">
@@ -731,7 +730,7 @@ const templates = `
 {{define "setup"}}
 <!doctype html>
 <html lang="{{.Lang}}">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><link rel="icon" href="/admin/static/tokenflow-logo.svg"><link rel="stylesheet" href="/admin/static/css/tokens.css">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><link rel="icon" type="image/png" href="/admin/static/tokenflow-logo.png"><link rel="stylesheet" href="/admin/static/css/tokens.css">
   {{template "admin_pwa_head" .}}
   <link rel="stylesheet" href="/admin/static/css/base.css">
   <link rel="stylesheet" href="/admin/static/css/components.css">
@@ -741,7 +740,7 @@ const templates = `
 <body class="auth-page">
   <main class="auth-card">
     <div class="auth-head">
-      <h1 class="brand"><img src="/admin/static/tokenflow-logo.svg" alt="" aria-hidden="true"><span>{{tr .Lang "app.title"}}</span></h1>
+      <h1 class="brand"><img src="/admin/static/tokenflow-logo.png" alt="" aria-hidden="true"><span>{{tr .Lang "app.title"}}</span></h1>
       {{template "lang_switch" .}}
     </div>
     <h2 class="auth-title">{{tr .Lang "initial_setup"}}</h2>
@@ -763,7 +762,7 @@ const templates = `
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.Title}}</title>
-  <link rel="icon" href="/admin/static/tokenflow-logo.svg">
+  <link rel="icon" type="image/png" href="/admin/static/tokenflow-logo.png">
   {{template "admin_pwa_head" .}}
   <link rel="stylesheet" href="/admin/static/css/tokens.css">
   <link rel="stylesheet" href="/admin/static/css/base.css">
@@ -775,7 +774,7 @@ const templates = `
 <body class="admin-page">
   <header class="topbar">
     <div class="topbar-inner">
-      <h1 class="brand"><img src="/admin/static/tokenflow-logo.svg" alt="" aria-hidden="true"><span>{{tr .Lang "app.title"}}</span></h1>
+      <h1 class="brand"><img src="/admin/static/tokenflow-logo.png" alt="" aria-hidden="true"><span>{{tr .Lang "app.title"}}</span></h1>
       <div class="top-actions">
         {{template "lang_switch" .}}
         <span class="user-chip" title="{{.Username}}">{{.Username}}</span>
@@ -984,7 +983,7 @@ const templates = `
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>{{.Title}}</title>
-  <link rel="icon" href="/admin/static/tokenflow-logo.svg">
+  <link rel="icon" type="image/png" href="/admin/static/tokenflow-logo.png">
   {{template "admin_pwa_head" .}}
   <link rel="stylesheet" href="/admin/static/css/tokens.css">
   <link rel="stylesheet" href="/admin/static/css/base.css">
@@ -994,11 +993,11 @@ const templates = `
   <script src="/admin/static/theme.js"></script>
 </head>
 <body class="admin-page chat-page">
-  <main class="chat-app" data-chat-root data-chat-ready="false" data-chat-lang="{{.Lang}}" data-chat-api-prefix="/admin/api/chat" data-chat-csrf-cookie="gateway_csrf" data-chat-settings-writable="true">
+  <main class="chat-app" data-chat-root data-chat-ready="false" data-chat-lang="{{.Lang}}" data-chat-api-prefix="/admin/api/chat" data-chat-csrf-cookie="gateway_csrf">
     <button type="button" class="chat-sidebar-backdrop" data-chat-sidebar-backdrop aria-label="Close conversations"></button>
     <aside class="chat-app-sidebar" data-chat-sidebar aria-label="Conversations">
       <div class="chat-sidebar-head">
-        <a class="chat-sidebar-brand" href="/admin/chat"><img src="/admin/static/tokenflow-logo.svg" alt=""><span>{{tr .Lang "app.title"}}</span></a>
+        <a class="chat-sidebar-brand" href="/admin/chat"><img src="/admin/static/tokenflow-logo.png" alt=""><span>{{tr .Lang "app.title"}}</span></a>
         <div class="chat-sidebar-head-actions">
           <button type="button" class="chat-icon-button" data-chat-new title="New chat" aria-label="New chat"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-add"></use></svg></button>
           <button type="button" class="chat-icon-button" data-chat-sidebar-collapse title="Collapse sidebar" aria-label="Collapse sidebar"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-panel-left-close"></use></svg></button>
@@ -1075,7 +1074,7 @@ const templates = `
               <h3 data-chat-model-section-title>Model and reasoning</h3>
               <label class="chat-model-field">Model<select data-chat-model></select></label>
               <fieldset class="chat-thinking chat-settings-thinking"><legend>Thinking</legend><label><input type="radio" name="admin-chat-thinking" value="off">Off</label><label><input type="radio" name="admin-chat-thinking" value="low">Low</label><label><input type="radio" name="admin-chat-thinking" value="medium" checked>Medium</label><label><input type="radio" name="admin-chat-thinking" value="high">High</label></fieldset>
-              <label class="chat-settings-field chat-max-tools-field">Max tool calls<input data-chat-max-tool-calls type="number" min="0" max="20" step="1" value="6"></label>
+              <label class="chat-settings-field chat-max-tools-field">Max tool calls<input data-chat-max-tool-calls type="number" min="0" max="20" step="1" value="7"></label>
             </section>
             <section class="chat-settings-section">
               <h3 data-chat-instructions-title>Instructions</h3>

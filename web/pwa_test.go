@@ -114,6 +114,7 @@ func TestAdminPWAManifest(t *testing.T) {
 
 func TestPWAAssetsAreEmbedded(t *testing.T) {
 	for _, path := range []string{
+		"static/tokenflow-logo.png",
 		"static/pwa/manifest.webmanifest", "static/pwa/admin-manifest.webmanifest", "static/pwa/service-worker.js", "static/pwa/register.js",
 		"static/pwa/offline.html", "static/pwa/icon-192.png", "static/pwa/icon-512.png",
 		"static/pwa/icon-maskable-512.png",
@@ -163,7 +164,8 @@ func TestServiceWorkerKeepsAuthenticatedTrafficNetworkOnly(t *testing.T) {
 		`"/admin/static/core/api.js"`, `"/admin/static/core/dom.js"`,
 		`"/admin/static/core/format.js"`, `"/admin/static/core/toast.js"`,
 		`"/admin/static/core/confirm.js"`, `"/admin/static/core/nav.js"`,
-		"const CACHE_NAME = `${CACHE_PREFIX}v14`", `"/admin/manifest.webmanifest"`,
+		"const CACHE_NAME = `${CACHE_PREFIX}v15`", `"/admin/manifest.webmanifest"`,
+		`"/admin/static/tokenflow-logo.png"`,
 		`"/admin/static/css/home.css"`, `"/admin/static/home/app.js"`,
 		`"/admin/static/chat/highlight.bundle.js"`, `"/admin/static/chat/html-preview.js"`,
 		`"/admin/static/chat/markdown.js"`,

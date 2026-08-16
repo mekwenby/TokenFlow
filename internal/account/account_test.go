@@ -305,7 +305,7 @@ func TestAccountChatAPIRequiresSessionCSRFAndQuota(t *testing.T) {
 	}
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"models"`) || !strings.Contains(rec.Body.String(), `"default_system_prompt"`) || !strings.Contains(rec.Body.String(), `"max_tool_calls"`) || !strings.Contains(rec.Body.String(), `"max_user_message_chars":131072`) {
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"models"`) || !strings.Contains(rec.Body.String(), `"default_system_prompt"`) || !strings.Contains(rec.Body.String(), `"max_tool_calls":7`) || !strings.Contains(rec.Body.String(), `"max_user_message_chars":131072`) {
 		t.Fatalf("unexpected chat models response: %d %s", rec.Code, rec.Body.String())
 	}
 
@@ -324,7 +324,7 @@ func TestAccountChatAPIRequiresSessionCSRFAndQuota(t *testing.T) {
 	if !strings.Contains(body, `content="width=device-width, initial-scale=1, viewport-fit=cover"`) {
 		t.Fatalf("account chat page should opt into safe-area viewport handling: %s", body)
 	}
-	for _, expected := range []string{`class="admin-page chat-page"`, `data-chat-root`, `data-chat-ready="false"`, `data-chat-lang=`, `data-chat-api-prefix="/account/api/chat"`, `data-chat-csrf-cookie="gateway_account_csrf"`, `data-chat-settings-writable="false"`, `data-chat-sidebar`, `data-chat-sidebar-toggle`, `data-chat-conversation-search`, `data-chat-account-menu`, `data-chat-tools-menu`, `data-chat-process`, `data-chat-scroll-bottom`, `data-chat-user-avatar`, `data-chat-assistant-avatar`, `data-chat-max-tool-calls`, `data-chat-default-system-prompt`, `data-chat-auto-title`, `css/chat.css`, `chat/app.js`, `href="/account"`} {
+	for _, expected := range []string{`class="admin-page chat-page"`, `data-chat-root`, `data-chat-ready="false"`, `data-chat-lang=`, `data-chat-api-prefix="/account/api/chat"`, `data-chat-csrf-cookie="gateway_account_csrf"`, `data-chat-sidebar`, `data-chat-sidebar-toggle`, `data-chat-conversation-search`, `data-chat-account-menu`, `data-chat-tools-menu`, `data-chat-process`, `data-chat-scroll-bottom`, `data-chat-user-avatar`, `data-chat-assistant-avatar`, `data-chat-max-tool-calls`, `value="7"`, `data-chat-default-system-prompt`, `data-chat-auto-title`, `css/chat.css`, `chat/app.js`, `href="/account"`} {
 		if rec.Code != http.StatusOK || !strings.Contains(body, expected) {
 			t.Fatalf("missing %q in account chat page: status=%d body=%s", expected, rec.Code, body)
 		}
@@ -345,28 +345,6 @@ func TestAccountChatAPIRequiresSessionCSRFAndQuota(t *testing.T) {
 		t.Fatalf("chat conversation create without CSRF should fail: %d %s", rec.Code, rec.Body.String())
 	}
 
-	req = httptest.NewRequest(http.MethodGet, "/account/api/chat/settings", nil)
-	for _, cookie := range cookies {
-		req.AddCookie(cookie)
-	}
-	rec = httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"max_tool_calls":6`) {
-		t.Fatalf("unexpected chat settings response: %d %s", rec.Code, rec.Body.String())
-	}
-
-	req = httptest.NewRequest(http.MethodPatch, "/account/api/chat/settings", strings.NewReader(`{"max_tool_calls":8}`))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-CSRF-Token", csrf)
-	for _, cookie := range cookies {
-		req.AddCookie(cookie)
-	}
-	rec = httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-	if rec.Code == http.StatusOK {
-		t.Fatalf("account chat settings patch should not be allowed: %d %s", rec.Code, rec.Body.String())
-	}
-
 	req = httptest.NewRequest(http.MethodPost, "/account/api/chat/conversations", strings.NewReader(`{"title":"test","model":"model-a","thinking_effort":"low","user_avatar":"🧑‍🚀","assistant_avatar":"✨"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-CSRF-Token", csrf)
@@ -382,8 +360,38 @@ func TestAccountChatAPIRequiresSessionCSRFAndQuota(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &conv); err != nil {
 		t.Fatal(err)
 	}
-	if conv.ConsumerUserID == nil || *conv.ConsumerUserID != user.ID || conv.AdminUserID != nil || conv.UserAvatar != "🧑‍🚀" || conv.AssistantAvatar != "✨" {
+	if conv.ConsumerUserID == nil || *conv.ConsumerUserID != user.ID || conv.AdminUserID != nil || conv.UserAvatar != "🧑‍🚀" || conv.AssistantAvatar != "✨" || conv.MaxToolCalls != store.DefaultChatMaxToolCalls {
 		t.Fatalf("conversation was not scoped to account user: %#v", conv)
+	}
+
+	req = httptest.NewRequest(http.MethodPatch, "/account/api/chat/conversations/"+strconv.FormatInt(conv.ID, 10), strings.NewReader(`{"max_tool_calls":8}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("account user should update conversation max tool calls: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &conv); err != nil {
+		t.Fatal(err)
+	}
+	if conv.MaxToolCalls != 8 {
+		t.Fatalf("account conversation max tool calls were not updated: %#v", conv)
+	}
+
+	req = httptest.NewRequest(http.MethodPatch, "/account/api/chat/conversations/"+strconv.FormatInt(conv.ID, 10), strings.NewReader(`{"max_tool_calls":-1}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid account conversation max tool calls should fail: %d %s", rec.Code, rec.Body.String())
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/account/api/chat/conversations/"+strconv.FormatInt(conv.ID, 10)+"/title", nil)
@@ -450,7 +458,7 @@ func TestAccountChatAPIRequiresSessionCSRFAndQuota(t *testing.T) {
 		t.Fatal(err)
 	}
 	limitedOwner := store.ChatOwner{Type: store.ChatOwnerConsumer, ID: limited.ID, Name: limited.Email}
-	limitedConv, err := handler.store.CreateChatConversation(context.Background(), limitedOwner, "limited", "model-a", "medium", "", "", "", "")
+	limitedConv, err := handler.store.CreateChatConversation(context.Background(), limitedOwner, "limited", "model-a", "medium", "", "", "", "", store.DefaultChatMaxToolCalls)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -19,12 +19,11 @@ const (
 )
 
 type RouteConfig struct {
-	BasePath         string
-	Service          *Service
-	Store            *store.Store
-	Owner            func(*http.Request) (store.ChatOwner, bool)
-	RequireCSRF      func(http.ResponseWriter, *http.Request) bool
-	SettingsWritable bool
+	BasePath    string
+	Service     *Service
+	Store       *store.Store
+	Owner       func(*http.Request) (store.ChatOwner, bool)
+	RequireCSRF func(http.ResponseWriter, *http.Request) bool
 }
 
 type routeHandler struct {
@@ -39,16 +38,13 @@ type conversationPayload struct {
 	Nickname        *string `json:"nickname"`
 	UserAvatar      *string `json:"user_avatar"`
 	AssistantAvatar *string `json:"assistant_avatar"`
+	MaxToolCalls    *int    `json:"max_tool_calls"`
 }
 
 func RegisterRoutes(r chi.Router, cfg RouteConfig) {
 	h := routeHandler{cfg: cfg}
 	base := strings.TrimRight(cfg.BasePath, "/")
 	r.Get(base+"/models", h.models)
-	r.Get(base+"/settings", h.settings)
-	if cfg.SettingsWritable {
-		r.Patch(base+"/settings", h.settings)
-	}
 	r.Get(base+"/conversations", h.conversations)
 	r.Post(base+"/conversations", h.conversations)
 	r.Get(base+"/conversations/{conversationID}", h.conversation)
@@ -62,44 +58,12 @@ func RegisterRoutes(r chi.Router, cfg RouteConfig) {
 
 func (h routeHandler) models(w http.ResponseWriter, r *http.Request) {
 	models, err := h.cfg.Service.Models(r.Context())
-	maxToolCalls := store.DefaultChatMaxToolCalls
-	if err == nil {
-		maxToolCalls, err = h.cfg.Store.ChatMaxToolCalls(r.Context())
-	}
 	writeChatResult(w, map[string]any{
 		"models":                 models,
 		"default_system_prompt":  h.cfg.Service.DefaultSystemPrompt(),
-		"max_tool_calls":         maxToolCalls,
+		"max_tool_calls":         store.DefaultChatMaxToolCalls,
 		"max_user_message_chars": MaxUserMessageRunes,
 	}, err)
-}
-
-func (h routeHandler) settings(w http.ResponseWriter, r *http.Request) {
-	owner, ok := h.owner(w, r)
-	if !ok {
-		return
-	}
-	switch r.Method {
-	case http.MethodGet:
-		maxToolCalls, err := h.cfg.Store.ChatMaxToolCalls(r.Context())
-		writeChatResult(w, map[string]any{"max_tool_calls": maxToolCalls}, err)
-	case http.MethodPatch:
-		if !h.cfg.SettingsWritable || owner.Type != store.ChatOwnerAdmin {
-			writeChatError(w, http.StatusForbidden, "admin required")
-			return
-		}
-		if !h.cfg.RequireCSRF(w, r) {
-			return
-		}
-		var payload struct {
-			MaxToolCalls int `json:"max_tool_calls"`
-		}
-		if !decodeChatPayload(w, r, &payload, chatWriteBodyLimit) {
-			return
-		}
-		maxToolCalls, err := h.cfg.Store.UpdateChatMaxToolCalls(r.Context(), payload.MaxToolCalls)
-		writeChatResult(w, map[string]any{"max_tool_calls": maxToolCalls}, err)
-	}
 }
 
 func (h routeHandler) conversations(w http.ResponseWriter, r *http.Request) {
@@ -123,6 +87,7 @@ func (h routeHandler) conversations(w http.ResponseWriter, r *http.Request) {
 			Nickname        string `json:"nickname"`
 			UserAvatar      string `json:"user_avatar"`
 			AssistantAvatar string `json:"assistant_avatar"`
+			MaxToolCalls    *int   `json:"max_tool_calls"`
 		}
 		if !decodeChatPayload(w, r, &payload, chatWriteBodyLimit) {
 			return
@@ -131,7 +96,11 @@ func (h routeHandler) conversations(w http.ResponseWriter, r *http.Request) {
 			writeChatResult(w, nil, err)
 			return
 		}
-		conv, err := h.cfg.Store.CreateChatConversation(r.Context(), owner, payload.Title, payload.Model, payload.ThinkingEffort, payload.SystemPrompt, payload.Nickname, payload.UserAvatar, payload.AssistantAvatar)
+		maxToolCalls := store.DefaultChatMaxToolCalls
+		if payload.MaxToolCalls != nil {
+			maxToolCalls = *payload.MaxToolCalls
+		}
+		conv, err := h.cfg.Store.CreateChatConversation(r.Context(), owner, payload.Title, payload.Model, payload.ThinkingEffort, payload.SystemPrompt, payload.Nickname, payload.UserAvatar, payload.AssistantAvatar, maxToolCalls)
 		writeChatResult(w, conv, err)
 	}
 }
@@ -165,7 +134,7 @@ func (h routeHandler) conversation(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		conv, err := h.cfg.Store.UpdateChatConversation(r.Context(), owner, id, payload.Title, payload.Model, payload.ThinkingEffort, payload.SystemPrompt, payload.Nickname, payload.UserAvatar, payload.AssistantAvatar)
+		conv, err := h.cfg.Store.UpdateChatConversation(r.Context(), owner, id, payload.Title, payload.Model, payload.ThinkingEffort, payload.SystemPrompt, payload.Nickname, payload.UserAvatar, payload.AssistantAvatar, payload.MaxToolCalls)
 		writeChatResult(w, conv, err)
 	case http.MethodDelete:
 		if !h.cfg.RequireCSRF(w, r) {

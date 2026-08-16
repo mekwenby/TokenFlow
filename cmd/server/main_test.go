@@ -26,7 +26,7 @@ func TestHomeShowsPortalInsteadOfRedirect(t *testing.T) {
 		`<body class="home-page">`,
 		`href="/admin/static/css/home.css"`,
 		`src="/admin/static/home/app.js"`,
-		`src="/admin/static/tokenflow-logo.svg"`,
+		`src="/admin/static/tokenflow-logo.png"`,
 		`href="/admin/static/icons.svg#icon-route"`,
 		`class="route-flow-highlight route-request-highlight route-flow-animated"`,
 		`class="route-connector route-connector-inbound"`,

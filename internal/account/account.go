@@ -656,7 +656,7 @@ const templates = `
 {{define "auth_head"}}
 <!doctype html>
 <html lang="{{.Lang}}">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><link rel="icon" href="/admin/static/tokenflow-logo.svg"><link rel="stylesheet" href="/admin/static/css/tokens.css">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{.Title}}</title><link rel="icon" type="image/png" href="/admin/static/tokenflow-logo.png"><link rel="stylesheet" href="/admin/static/css/tokens.css">
   {{template "pwa_head" .}}
   <link rel="stylesheet" href="/admin/static/css/base.css">
   <link rel="stylesheet" href="/admin/static/css/components.css">
@@ -670,7 +670,7 @@ const templates = `
 <body class="auth-page">
   <main class="auth-card">
     <div class="auth-head">
-      <h1 class="brand"><img src="/admin/static/tokenflow-logo.svg" alt="" aria-hidden="true"><span>{{tr .Lang "app.title"}}</span></h1>
+      <h1 class="brand"><img src="/admin/static/tokenflow-logo.png" alt="" aria-hidden="true"><span>{{tr .Lang "app.title"}}</span></h1>
       <a href="/account/login">{{tr .Lang "login"}}</a>
     </div>
     <h2 class="auth-title">{{tr .Lang "create_account"}}</h2>
@@ -690,7 +690,7 @@ const templates = `
 <body class="auth-page">
   <main class="auth-card">
     <div class="auth-head">
-      <h1 class="brand"><img src="/admin/static/tokenflow-logo.svg" alt="" aria-hidden="true"><span>{{tr .Lang "app.title"}}</span></h1>
+      <h1 class="brand"><img src="/admin/static/tokenflow-logo.png" alt="" aria-hidden="true"><span>{{tr .Lang "app.title"}}</span></h1>
       <a href="/account/register">{{tr .Lang "register"}}</a>
     </div>
     <h2 class="auth-title">{{tr .Lang "account_login"}}</h2>
@@ -713,7 +713,7 @@ const templates = `
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.Title}}</title>
-  <link rel="icon" href="/admin/static/tokenflow-logo.svg">
+  <link rel="icon" type="image/png" href="/admin/static/tokenflow-logo.png">
   {{template "pwa_head" .}}
   <link rel="stylesheet" href="/admin/static/css/tokens.css">
   <link rel="stylesheet" href="/admin/static/css/base.css">
@@ -725,7 +725,7 @@ const templates = `
 <body class="admin-page">
   <header class="topbar">
     <div class="topbar-inner">
-      <h1 class="brand"><img src="/admin/static/tokenflow-logo.svg" alt="" aria-hidden="true"><span>{{tr .Lang "app.title"}}</span></h1>
+      <h1 class="brand"><img src="/admin/static/tokenflow-logo.png" alt="" aria-hidden="true"><span>{{tr .Lang "app.title"}}</span></h1>
       <div class="top-actions">
         <span class="user-chip" title="{{.Email}}">{{.Email}}</span>
         <form method="post" action="/account/logout"><input type="hidden" name="csrf" value="{{.CSRFToken}}"><button type="submit" class="secondary icon-label"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-log-out"></use></svg><span>{{tr .Lang "logout"}}</span></button></form>
@@ -807,7 +807,7 @@ const templates = `
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>{{.Title}}</title>
-  <link rel="icon" href="/admin/static/tokenflow-logo.svg">
+  <link rel="icon" type="image/png" href="/admin/static/tokenflow-logo.png">
   {{template "pwa_head" .}}
   <link rel="stylesheet" href="/admin/static/css/tokens.css">
   <link rel="stylesheet" href="/admin/static/css/base.css">
@@ -817,11 +817,11 @@ const templates = `
   <script src="/admin/static/theme.js"></script>
 </head>
 <body class="admin-page chat-page">
-  <main class="chat-app" data-chat-root data-chat-ready="false" data-chat-lang="{{.Lang}}" data-chat-api-prefix="/account/api/chat" data-chat-csrf-cookie="gateway_account_csrf" data-chat-settings-writable="false">
+  <main class="chat-app" data-chat-root data-chat-ready="false" data-chat-lang="{{.Lang}}" data-chat-api-prefix="/account/api/chat" data-chat-csrf-cookie="gateway_account_csrf">
     <button type="button" class="chat-sidebar-backdrop" data-chat-sidebar-backdrop aria-label="Close conversations"></button>
     <aside class="chat-app-sidebar" data-chat-sidebar aria-label="Conversations">
       <div class="chat-sidebar-head">
-        <a class="chat-sidebar-brand" href="/account/chat"><img src="/admin/static/tokenflow-logo.svg" alt=""><span>{{tr .Lang "app.title"}}</span></a>
+        <a class="chat-sidebar-brand" href="/account/chat"><img src="/admin/static/tokenflow-logo.png" alt=""><span>{{tr .Lang "app.title"}}</span></a>
         <div class="chat-sidebar-head-actions">
           <button type="button" class="chat-icon-button" data-chat-new title="New chat" aria-label="New chat"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-add"></use></svg></button>
           <button type="button" class="chat-icon-button" data-chat-sidebar-collapse title="Collapse sidebar" aria-label="Collapse sidebar"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-panel-left-close"></use></svg></button>
@@ -865,7 +865,7 @@ const templates = `
             <button type="button" class="secondary action-icon" data-chat-settings-close title="Close" aria-label="Close settings"><svg class="icon" aria-hidden="true"><use href="/admin/static/icons.svg#icon-close"></use></svg></button>
           </div>
           <div class="chat-settings-body">
-            <section class="chat-settings-section"><h3 data-chat-model-section-title>Model and reasoning</h3><label class="chat-model-field">Model<select data-chat-model></select></label><fieldset class="chat-thinking chat-settings-thinking"><legend>Thinking</legend><label><input type="radio" name="account-chat-thinking" value="off">Off</label><label><input type="radio" name="account-chat-thinking" value="low">Low</label><label><input type="radio" name="account-chat-thinking" value="medium" checked>Medium</label><label><input type="radio" name="account-chat-thinking" value="high">High</label></fieldset><label class="chat-settings-field chat-max-tools-field">Max tool calls<input data-chat-max-tool-calls type="number" min="0" max="20" step="1" value="6" readonly></label></section>
+            <section class="chat-settings-section"><h3 data-chat-model-section-title>Model and reasoning</h3><label class="chat-model-field">Model<select data-chat-model></select></label><fieldset class="chat-thinking chat-settings-thinking"><legend>Thinking</legend><label><input type="radio" name="account-chat-thinking" value="off">Off</label><label><input type="radio" name="account-chat-thinking" value="low">Low</label><label><input type="radio" name="account-chat-thinking" value="medium" checked>Medium</label><label><input type="radio" name="account-chat-thinking" value="high">High</label></fieldset><label class="chat-settings-field chat-max-tools-field">Max tool calls<input data-chat-max-tool-calls type="number" min="0" max="20" step="1" value="7"></label></section>
             <section class="chat-settings-section"><h3 data-chat-instructions-title>Instructions</h3><details class="chat-default-system-prompt"><summary data-chat-default-system-title>Default system prompt</summary><span data-chat-default-system-hint>Always applied by TokenFlow. Your instructions below are appended.</span><pre data-chat-default-system-prompt></pre></details><label class="chat-settings-field">System prompt<textarea data-chat-system-prompt maxlength="8000" rows="7" placeholder="Optional instructions for this conversation"></textarea></label></section>
             <section class="chat-settings-section"><h3 data-chat-identity-title>Identity</h3><label class="chat-settings-field">My nickname<input data-chat-nickname maxlength="64" placeholder="Optional display name"></label><div class="chat-avatar-settings" aria-label="Avatar settings"><div class="chat-avatar-field"><div class="chat-avatar-card-head"><span>User avatar</span><input data-chat-user-avatar maxlength="16" placeholder="😀" aria-label="User avatar"></div><div class="chat-avatar-picker" aria-label="User avatar presets"></div></div><div class="chat-avatar-field"><div class="chat-avatar-card-head"><span>Assistant avatar</span><input data-chat-assistant-avatar maxlength="16" placeholder="🤖" aria-label="Assistant avatar"></div><div class="chat-avatar-picker" aria-label="Assistant avatar presets"></div></div></div></section>
           </div>

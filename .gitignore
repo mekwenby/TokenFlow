@@ -1,11 +1,11 @@
 # Local runtime data
-data/
+/data/
 
 # Build artifacts
 dist/
 build/
 coverage/
-tokenflow
+/tokenflow
 tokenflow.exe
 tokenflow-linux-amd64
 server.exe
@@ -17,6 +17,18 @@ logs/
 node_modules/
 __pycache__/
 *.pyc
+android/.gradle/
+android/.kotlin/
+android/local.properties
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+*.secret
+*.tfcfg
+/output/
 
 # Editor files
 .idea/

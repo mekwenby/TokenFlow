@@ -1,11 +1,11 @@
 const CACHE_PREFIX = "tokenflow-pwa-";
-const CACHE_NAME = `${CACHE_PREFIX}v14`;
+const CACHE_NAME = `${CACHE_PREFIX}v15`;
 const OFFLINE_URL = "/offline";
 const PRECACHE_URLS = [
   "/manifest.webmanifest",
   "/admin/manifest.webmanifest",
   OFFLINE_URL,
-  "/admin/static/tokenflow-logo.svg",
+  "/admin/static/tokenflow-logo.png",
   "/admin/static/pwa/icon-192.png",
   "/admin/static/pwa/icon-512.png",
   "/admin/static/pwa/icon-maskable-512.png",

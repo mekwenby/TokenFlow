@@ -432,14 +432,33 @@ func TestAuthSessionMigrationScopingAndRevocation(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := st.CreateMobileSession(ctx, MobileSession{
+		ConsumerUserID: 1,
+		TokenHash:      "mobile-cascade",
+		DeviceName:     "Deleted phone",
+		CreatedAt:      now,
+		LastUsedAt:     now,
+		ExpiresAt:      now.Add(30 * 24 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := st.db.ExecContext(ctx, `DELETE FROM consumer_users WHERE id = 1`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.AuthSessionByTokenHash(ctx, AuthSessionOwnerConsumer, "consumer-cascade"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleting a consumer should cascade to sessions, got %v", err)
 	}
+	if _, err := st.MobileSessionByTokenHash(ctx, "mobile-cascade"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleting a consumer should cascade to mobile sessions, got %v", err)
+	}
 
-	for _, index := range []string{"idx_auth_sessions_consumer", "idx_auth_sessions_admin", "idx_auth_sessions_expires_at"} {
+	for _, index := range []string{
+		"idx_auth_sessions_consumer",
+		"idx_auth_sessions_admin",
+		"idx_auth_sessions_expires_at",
+		"idx_mobile_sessions_consumer",
+		"idx_mobile_sessions_expires_at",
+	} {
 		var count int
 		if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, index).Scan(&count); err != nil {
 			t.Fatal(err)
@@ -1014,18 +1033,18 @@ func TestStoreChatConversationsAreScopedAndCascade(t *testing.T) {
 	consumerOwner := ChatOwner{Type: ChatOwnerConsumer, ID: user.ID, Name: user.Email}
 	otherOwner := ChatOwner{Type: ChatOwnerConsumer, ID: other.ID, Name: other.Email}
 	adminOwner := ChatOwner{Type: ChatOwnerAdmin, ID: admin.ID, Name: admin.Username}
-	consumerConv, err := st.CreateChatConversation(ctx, consumerOwner, "", "gpt-4.1", "high", "  Be concise.  ", "  Mek  ", "  🧑‍💻  ", "  🧠  ")
+	consumerConv, err := st.CreateChatConversation(ctx, consumerOwner, "", "gpt-4.1", "high", "  Be concise.  ", "  Mek  ", "  🧑‍💻  ", "  🧠  ", DefaultChatMaxToolCalls)
 	if err != nil {
 		t.Fatal(err)
 	}
-	adminConv, err := st.CreateChatConversation(ctx, adminOwner, "Admin chat", "claude", "low", "", "", "", "")
+	adminConv, err := st.CreateChatConversation(ctx, adminOwner, "Admin chat", "claude", "low", "", "", "", "", DefaultChatMaxToolCalls)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.CreateChatConversation(ctx, otherOwner, "Other chat", "gpt-4.1-mini", "medium", "", "", "", ""); err != nil {
+	if _, err := st.CreateChatConversation(ctx, otherOwner, "Other chat", "gpt-4.1-mini", "medium", "", "", "", "", DefaultChatMaxToolCalls); err != nil {
 		t.Fatal(err)
 	}
-	if consumerConv.Title != "New chat" || consumerConv.ThinkingEffort != "high" || consumerConv.SystemPrompt != "Be concise." || consumerConv.Nickname != "Mek" || consumerConv.UserAvatar != "🧑‍💻" || consumerConv.AssistantAvatar != "🧠" || consumerConv.Status != ChatConversationStatusIdle || consumerConv.ActiveOperation != "" || consumerConv.ConsumerUserID == nil || *consumerConv.ConsumerUserID != user.ID || consumerConv.AdminUserID != nil {
+	if consumerConv.Title != "New chat" || consumerConv.ThinkingEffort != "high" || consumerConv.SystemPrompt != "Be concise." || consumerConv.Nickname != "Mek" || consumerConv.UserAvatar != "🧑‍💻" || consumerConv.AssistantAvatar != "🧠" || consumerConv.MaxToolCalls != DefaultChatMaxToolCalls || consumerConv.Status != ChatConversationStatusIdle || consumerConv.ActiveOperation != "" || consumerConv.ConsumerUserID == nil || *consumerConv.ConsumerUserID != user.ID || consumerConv.AdminUserID != nil {
 		t.Fatalf("unexpected consumer conversation: %#v", consumerConv)
 	}
 	if adminConv.UserAvatar != "😀" || adminConv.AssistantAvatar != "🤖" || adminConv.AdminUserID == nil || *adminConv.AdminUserID != admin.ID || adminConv.ConsumerUserID != nil {
@@ -1059,12 +1078,17 @@ func TestStoreChatConversationsAreScopedAndCascade(t *testing.T) {
 	longNickname := strings.Repeat("n", 70)
 	emptyAvatar := "   "
 	longAvatar := strings.Repeat("🌟", 20)
-	consumerConv, err = st.UpdateChatConversation(ctx, consumerOwner, consumerConv.ID, &renamed, &model, &effort, &longPrompt, &longNickname, &emptyAvatar, &longAvatar)
+	maxToolCalls := 20
+	consumerConv, err = st.UpdateChatConversation(ctx, consumerOwner, consumerConv.ID, &renamed, &model, &effort, &longPrompt, &longNickname, &emptyAvatar, &longAvatar, &maxToolCalls)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if consumerConv.Title != renamed || consumerConv.Model != model || consumerConv.ThinkingEffort != "medium" || len([]rune(consumerConv.SystemPrompt)) != 8000 || len([]rune(consumerConv.Nickname)) != 64 || consumerConv.UserAvatar != "😀" || len([]rune(consumerConv.AssistantAvatar)) != 16 {
+	if consumerConv.Title != renamed || consumerConv.Model != model || consumerConv.ThinkingEffort != "medium" || len([]rune(consumerConv.SystemPrompt)) != 8000 || len([]rune(consumerConv.Nickname)) != 64 || consumerConv.UserAvatar != "😀" || len([]rune(consumerConv.AssistantAvatar)) != 16 || consumerConv.MaxToolCalls != 20 {
 		t.Fatalf("conversation update did not normalize fields: %#v", consumerConv)
+	}
+	invalidMaxToolCalls := 21
+	if _, err := st.UpdateChatConversation(ctx, consumerOwner, consumerConv.ID, nil, nil, nil, nil, nil, nil, nil, &invalidMaxToolCalls); err != ErrInvalidChatMaxToolCalls {
+		t.Fatalf("invalid max tool calls should be rejected, got %v", err)
 	}
 	if consumerConv.TitleAutoGenerated {
 		t.Fatalf("manual title update should disable auto title: %#v", consumerConv)
@@ -1147,25 +1171,8 @@ func TestStoreMigratesChatConversationSettingsColumns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if conv.SystemPrompt != "" || conv.Nickname != "" || conv.UserAvatar != "😀" || conv.AssistantAvatar != "🤖" || conv.TitleAutoGenerated || conv.Status != ChatConversationStatusIdle || conv.StatusMessage != "" || conv.ActiveOperation != "" {
+	if conv.SystemPrompt != "" || conv.Nickname != "" || conv.UserAvatar != "😀" || conv.AssistantAvatar != "🤖" || conv.MaxToolCalls != DefaultChatMaxToolCalls || conv.TitleAutoGenerated || conv.Status != ChatConversationStatusIdle || conv.StatusMessage != "" || conv.ActiveOperation != "" {
 		t.Fatalf("migrated conversation settings should default empty: %#v", conv)
-	}
-	maxToolCalls, err := st.ChatMaxToolCalls(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if maxToolCalls != DefaultChatMaxToolCalls {
-		t.Fatalf("unexpected default max tool calls: %d", maxToolCalls)
-	}
-	maxToolCalls, err = st.UpdateChatMaxToolCalls(ctx, 20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if maxToolCalls != 20 {
-		t.Fatalf("max tool calls was not updated: %d", maxToolCalls)
-	}
-	if _, err := st.UpdateChatMaxToolCalls(ctx, 21); err != ErrInvalidChatMaxToolCalls {
-		t.Fatalf("invalid max tool calls should be rejected, got %v", err)
 	}
 }
 
@@ -1185,11 +1192,11 @@ func TestStoreChatConversationOperationLocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner := ChatOwner{Type: ChatOwnerAdmin, ID: admin.ID, Name: admin.Username}
-	conv, err := st.CreateChatConversation(ctx, owner, "", "model-a", "medium", "", "", "", "")
+	conv, err := st.CreateChatConversation(ctx, owner, "", "model-a", "medium", "", "", "", "", DefaultChatMaxToolCalls)
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, err := st.CreateChatConversation(ctx, owner, "other", "model-a", "medium", "", "", "", "")
+	other, err := st.CreateChatConversation(ctx, owner, "other", "model-a", "medium", "", "", "", "", DefaultChatMaxToolCalls)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1205,7 +1212,7 @@ func TestStoreChatConversationOperationLocks(t *testing.T) {
 		t.Fatalf("same conversation should be busy, got %v", err)
 	}
 	renamed := "blocked"
-	if _, err := st.UpdateChatConversation(ctx, owner, conv.ID, &renamed, nil, nil, nil, nil, nil, nil); err != ErrChatConversationBusy {
+	if _, err := st.UpdateChatConversation(ctx, owner, conv.ID, &renamed, nil, nil, nil, nil, nil, nil, nil); err != ErrChatConversationBusy {
 		t.Fatalf("busy conversation update should be rejected, got %v", err)
 	}
 	if err := st.DeleteChatConversation(ctx, owner, conv.ID); err != ErrChatConversationBusy {
@@ -1460,7 +1467,7 @@ func TestStoreChatTurnLifecycleAndLatestRegeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner := ChatOwner{Type: ChatOwnerAdmin, ID: admin.ID, Name: admin.Username}
-	conv, err := st.CreateChatConversation(ctx, owner, "", "model", "medium", "", "", "", "")
+	conv, err := st.CreateChatConversation(ctx, owner, "", "model", "medium", "", "", "", "", DefaultChatMaxToolCalls)
 	if err != nil {
 		t.Fatal(err)
 	}

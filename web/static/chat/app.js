@@ -256,7 +256,6 @@ roots.forEach((root) => initChat(root));
 function initChat(root) {
   const apiPrefix = root.dataset.chatApiPrefix;
   const csrfCookie = root.dataset.chatCsrfCookie;
-  const settingsWritable = root.dataset.chatSettingsWritable === "true";
   const lang = normalizeLang(root.dataset.chatLang || document.documentElement.lang || "en");
   const t = (key, values) => translate(lang, key, values);
   const numberFormat = new Intl.NumberFormat(lang);
@@ -267,9 +266,8 @@ function initChat(root) {
     messages: [],
     models: [],
     defaultSystemPrompt: "",
-    maxToolCalls: 6,
+    defaultMaxToolCalls: 7,
 	maxUserMessageChars: 131072,
-    settingsWritable,
     activeId: null,
     activeConversation: null,
     draft: null,
@@ -353,15 +351,14 @@ function initChat(root) {
 
   async function load() {
     try {
-      const [models, conversations, settings] = await Promise.all([
+      const [models, conversations] = await Promise.all([
         api("/models"),
         api("/conversations"),
-        api("/settings"),
       ]);
       state.models = models.models || [];
       state.defaultSystemPrompt = models.default_system_prompt || "";
 	  state.maxUserMessageChars = Number(models.max_user_message_chars) || 131072;
-      state.maxToolCalls = normalizeMaxToolCalls(settings.max_tool_calls ?? models.max_tool_calls ?? state.maxToolCalls);
+      state.defaultMaxToolCalls = normalizeMaxToolCalls(models.max_tool_calls ?? state.defaultMaxToolCalls);
       state.conversations = conversations.items || [];
       state.loading = false;
       renderModels();
@@ -381,11 +378,11 @@ function initChat(root) {
   }
 
   function renderLoading() {
-    el.messages.innerHTML = `<div class="chat-empty"><img src="/admin/static/tokenflow-logo.svg" alt=""><p>${esc(t("loading"))}</p></div>`;
+    el.messages.innerHTML = `<div class="chat-empty"><img src="/admin/static/tokenflow-logo.png" alt=""><p>${esc(t("loading"))}</p></div>`;
   }
 
   function renderLoadError(message) {
-    el.messages.innerHTML = `<div class="chat-empty chat-load-error"><img src="/admin/static/tokenflow-logo.svg" alt=""><h2>${esc(t("request_failed"))}</h2><p>${esc(message)}</p></div>`;
+    el.messages.innerHTML = `<div class="chat-empty chat-load-error"><img src="/admin/static/tokenflow-logo.png" alt=""><h2>${esc(t("request_failed"))}</h2><p>${esc(message)}</p></div>`;
   }
 
   function renderModels() {
@@ -408,6 +405,7 @@ function initChat(root) {
       nickname: source.nickname || "",
       user_avatar: avatarValue(source.user_avatar, defaultUserAvatar),
       assistant_avatar: avatarValue(source.assistant_avatar, defaultAssistantAvatar),
+      max_tool_calls: state.defaultMaxToolCalls,
     };
     populateSettings(state.draft);
     renderHeader();
@@ -435,6 +433,7 @@ function initChat(root) {
           nickname: draft.nickname || "",
           user_avatar: avatarValue(draft.user_avatar, defaultUserAvatar),
           assistant_avatar: avatarValue(draft.assistant_avatar, defaultAssistantAvatar),
+          max_tool_calls: normalizeMaxToolCalls(draft.max_tool_calls),
         }),
       });
       state.activeId = conv.id;
@@ -513,7 +512,7 @@ function initChat(root) {
     const previousTop = el.messages.scrollTop;
     if (!state.messages.length) {
       const noModels = !state.models.length;
-      el.messages.innerHTML = `<div class="chat-empty"><img src="/admin/static/tokenflow-logo.svg" alt=""><h2>${esc(noModels ? t("no_models") : t("greeting"))}</h2><p>${esc(noModels ? t("no_models_detail") : t("start_conversation"))}</p></div>`;
+      el.messages.innerHTML = `<div class="chat-empty"><img src="/admin/static/tokenflow-logo.png" alt=""><h2>${esc(noModels ? t("no_models") : t("greeting"))}</h2><p>${esc(noModels ? t("no_models_detail") : t("start_conversation"))}</p></div>`;
     } else {
       el.messages.innerHTML = state.messages.map((message, index) => renderMessage(message, index)).join("");
     }
@@ -1022,13 +1021,6 @@ function initChat(root) {
     } else {
       state.draft = { ...(state.draft || {}), ...values };
     }
-    if (state.settingsWritable && el.maxToolCalls) {
-      const nextMax = normalizeMaxToolCalls(el.maxToolCalls.value);
-      if (nextMax !== state.maxToolCalls) {
-        const settings = await api("/settings", { method: "PATCH", body: JSON.stringify({ max_tool_calls: nextMax }) });
-        state.maxToolCalls = normalizeMaxToolCalls(settings.max_tool_calls);
-      }
-    }
     populateSettings(currentConfig());
     renderHeader();
     renderConversations();
@@ -1045,6 +1037,7 @@ function initChat(root) {
       nickname: el.nickname?.value || "",
       user_avatar: el.userAvatar?.value || defaultUserAvatar,
       assistant_avatar: el.assistantAvatar?.value || defaultAssistantAvatar,
+      max_tool_calls: normalizeMaxToolCalls(el.maxToolCalls?.value),
     };
   }
 
@@ -1059,8 +1052,7 @@ function initChat(root) {
     if (el.userAvatar) el.userAvatar.value = avatarValue(conv.user_avatar, defaultUserAvatar);
     if (el.assistantAvatar) el.assistantAvatar.value = avatarValue(conv.assistant_avatar, defaultAssistantAvatar);
     if (el.maxToolCalls) {
-      el.maxToolCalls.value = String(state.maxToolCalls);
-      el.maxToolCalls.readOnly = !state.settingsWritable;
+      el.maxToolCalls.value = String(normalizeMaxToolCalls(conv.max_tool_calls ?? state.defaultMaxToolCalls));
     }
     renderSettingsSummary(conv);
   }
@@ -1078,7 +1070,6 @@ function initChat(root) {
     }
     if (el.maxToolCalls) {
       el.maxToolCalls.disabled = busy;
-      el.maxToolCalls.readOnly = !state.settingsWritable;
     }
     root.querySelectorAll("[data-chat-avatar-value], input[name$='-thinking']").forEach((item) => { item.disabled = busy; });
     const stream = activeStream();

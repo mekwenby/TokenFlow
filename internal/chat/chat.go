@@ -367,7 +367,7 @@ func (s *Service) runGeneration(ctx context.Context, owner store.ChatOwner, conv
 	}
 	thinkingEffort := store.NormalizeChatThinkingEffort(conv.ThinkingEffort)
 	if conv.Model != model || conv.ThinkingEffort != thinkingEffort {
-		conv, err = s.store.UpdateChatConversation(ctx, owner, conversationID, nil, &model, &thinkingEffort, nil, nil, nil, nil)
+		conv, err = s.store.UpdateChatConversation(ctx, owner, conversationID, nil, &model, &thinkingEffort, nil, nil, nil, nil, nil)
 		if err != nil {
 			return store.ChatMessage{}, err
 		}
@@ -468,10 +468,7 @@ func (s *Service) runGeneration(ctx context.Context, owner store.ChatOwner, conv
 	if runeLen(chatSystemPrompt(conv.SystemPrompt, conv.Nickname, req.EnableSearch, req.EnableRead, date))+len([]rune(req.Content)) > s.contextMaxRunes {
 		return assistantMessage, ErrContextTooLarge
 	}
-	maxToolCalls, err := s.store.ChatMaxToolCalls(runCtx)
-	if err != nil {
-		return assistantMessage, err
-	}
+	maxToolCalls := conv.MaxToolCalls
 	messages, updatedConv, err := s.prepareMessages(runCtx, owner, conv, history, req.EnableSearch, req.EnableRead, date)
 	if err != nil {
 		return assistantMessage, err

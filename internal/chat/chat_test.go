@@ -160,7 +160,7 @@ func TestServiceSendMessageRunsToolLoopAndRecordsUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner := store.ChatOwner{Type: store.ChatOwnerAdmin, ID: admin.ID, Name: admin.Username}
-	conv, err := st.CreateChatConversation(ctx, owner, "test", "gpt-test", "medium", "Always answer with sources.", "Mek", "😎", "🤖")
+	conv, err := st.CreateChatConversation(ctx, owner, "test", "gpt-test", "medium", "Always answer with sources.", "Mek", "😎", "🤖", store.DefaultChatMaxToolCalls)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +296,7 @@ func TestServiceSendMessageSummarizesFirstConversationTitle(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner := store.ChatOwner{Type: store.ChatOwnerAdmin, ID: admin.ID, Name: admin.Username}
-	conv, err := st.CreateChatConversation(ctx, owner, "新对话", "gpt-test", "medium", "", "", "", "")
+	conv, err := st.CreateChatConversation(ctx, owner, "新对话", "gpt-test", "medium", "", "", "", "", store.DefaultChatMaxToolCalls)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +353,7 @@ func TestServiceSendMessageSummarizesFirstConversationTitle(t *testing.T) {
 	}
 }
 
-func TestServiceSendMessageOmitsToolsWhenGlobalLimitIsZero(t *testing.T) {
+func TestServiceSendMessageOmitsToolsWhenConversationLimitIsZero(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	box, err := secret.Load(filepath.Join(dir, "app.secret"))
@@ -365,10 +365,6 @@ func TestServiceSendMessageOmitsToolsWhenGlobalLimitIsZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if _, err := st.UpdateChatMaxToolCalls(ctx, 0); err != nil {
-		t.Fatal(err)
-	}
-
 	var upstreamCalls int
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamCalls++
@@ -376,8 +372,12 @@ func TestServiceSendMessageOmitsToolsWhenGlobalLimitIsZero(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		if _, ok := body["tools"]; ok {
+		_, hasTools := body["tools"]
+		if upstreamCalls == 1 && hasTools {
 			t.Fatalf("tools should be omitted when max_tool_calls is 0: %#v", body)
+		}
+		if upstreamCalls == 2 && !hasTools {
+			t.Fatalf("tools should be available for a conversation with the default limit: %#v", body)
 		}
 		writeSSE(t, w, map[string]any{"choices": []any{map[string]any{"delta": map[string]any{"content": "No tools used."}}}})
 		writeSSE(t, w, map[string]any{"choices": []any{}, "usage": map[string]any{"prompt_tokens": 3, "completion_tokens": 3}})
@@ -409,7 +409,7 @@ func TestServiceSendMessageOmitsToolsWhenGlobalLimitIsZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner := store.ChatOwner{Type: store.ChatOwnerAdmin, ID: admin.ID, Name: admin.Username}
-	conv, err := st.CreateChatConversation(ctx, owner, "manual", "gpt-test", "medium", "", "", "", "")
+	conv, err := st.CreateChatConversation(ctx, owner, "manual", "gpt-test", "medium", "", "", "", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,8 +417,15 @@ func TestServiceSendMessageOmitsToolsWhenGlobalLimitIsZero(t *testing.T) {
 	if _, err := service.SendMessage(ctx, owner, conv.ID, SendRequest{Content: "Search anyway", EnableSearch: true, EnableRead: true}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if upstreamCalls != 1 {
-		t.Fatalf("manual title conversation should not request title summary, got %d upstream calls", upstreamCalls)
+	defaultConv, err := st.CreateChatConversation(ctx, owner, "default limit", "gpt-test", "medium", "", "", "", "", store.DefaultChatMaxToolCalls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SendMessage(ctx, owner, defaultConv.ID, SendRequest{Content: "Search with tools", EnableSearch: true, EnableRead: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if upstreamCalls != 2 {
+		t.Fatalf("each manual-title conversation should make one upstream request, got %d", upstreamCalls)
 	}
 }
 
@@ -475,7 +482,7 @@ func TestServiceSendMessageTitleSummaryFailureDoesNotBlockReply(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner := store.ChatOwner{Type: store.ChatOwnerAdmin, ID: admin.ID, Name: admin.Username}
-	conv, err := st.CreateChatConversation(ctx, owner, "", "gpt-test", "medium", "", "", "", "")
+	conv, err := st.CreateChatConversation(ctx, owner, "", "gpt-test", "medium", "", "", "", "", store.DefaultChatMaxToolCalls)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -571,7 +578,7 @@ func TestServiceGenerateConversationTitleForceOverwritesManualTitle(t *testing.T
 		t.Fatal(err)
 	}
 	owner := store.ChatOwner{Type: store.ChatOwnerAdmin, ID: admin.ID, Name: admin.Username}
-	conv, err := st.CreateChatConversation(ctx, owner, "Manual title", "gpt-test", "medium", "", "", "", "")
+	conv, err := st.CreateChatConversation(ctx, owner, "Manual title", "gpt-test", "medium", "", "", "", "", store.DefaultChatMaxToolCalls)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -664,7 +671,7 @@ func TestServiceGenerateConversationTitleRetriesEmptyAndFallsBack(t *testing.T) 
 		t.Fatal(err)
 	}
 	owner := store.ChatOwner{Type: store.ChatOwnerAdmin, ID: admin.ID, Name: admin.Username}
-	conv, err := st.CreateChatConversation(ctx, owner, "", "gpt-test", "medium", "", "", "", "")
+	conv, err := st.CreateChatConversation(ctx, owner, "", "gpt-test", "medium", "", "", "", "", store.DefaultChatMaxToolCalls)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -727,7 +734,7 @@ func TestServiceConversationBusyRejectsSendAndTitle(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner := store.ChatOwner{Type: store.ChatOwnerAdmin, ID: admin.ID, Name: admin.Username}
-	conv, err := st.CreateChatConversation(ctx, owner, "", "gpt-test", "medium", "", "", "", "")
+	conv, err := st.CreateChatConversation(ctx, owner, "", "gpt-test", "medium", "", "", "", "", store.DefaultChatMaxToolCalls)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -793,11 +800,11 @@ func TestServiceAllowsDifferentConversationWhileOneIsBusy(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner := store.ChatOwner{Type: store.ChatOwnerAdmin, ID: admin.ID, Name: admin.Username}
-	busyConv, err := st.CreateChatConversation(ctx, owner, "busy", "gpt-test", "medium", "", "", "", "")
+	busyConv, err := st.CreateChatConversation(ctx, owner, "busy", "gpt-test", "medium", "", "", "", "", store.DefaultChatMaxToolCalls)
 	if err != nil {
 		t.Fatal(err)
 	}
-	freeConv, err := st.CreateChatConversation(ctx, owner, "free", "gpt-test", "medium", "", "", "", "")
+	freeConv, err := st.CreateChatConversation(ctx, owner, "free", "gpt-test", "medium", "", "", "", "", store.DefaultChatMaxToolCalls)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -859,7 +866,7 @@ func TestServiceGenerateConversationTitleRequiresMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner := store.ChatOwner{Type: store.ChatOwnerAdmin, ID: admin.ID, Name: admin.Username}
-	conv, err := st.CreateChatConversation(ctx, owner, "", "gpt-test", "medium", "", "", "", "")
+	conv, err := st.CreateChatConversation(ctx, owner, "", "gpt-test", "medium", "", "", "", "", store.DefaultChatMaxToolCalls)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1348,7 +1355,7 @@ func newGenerationTestService(t *testing.T, upstreamHandler http.Handler) (*Serv
 		t.Fatal(err)
 	}
 	owner := store.ChatOwner{Type: store.ChatOwnerAdmin, ID: admin.ID, Name: admin.Username}
-	conv, err := st.CreateChatConversation(ctx, owner, "test", "gpt-test", "medium", "", "", "", "")
+	conv, err := st.CreateChatConversation(ctx, owner, "test", "gpt-test", "medium", "", "", "", "", store.DefaultChatMaxToolCalls)
 	if err != nil {
 		t.Fatal(err)
 	}

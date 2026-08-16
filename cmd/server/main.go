@@ -14,6 +14,7 @@ import (
 	"tokenflow/internal/admin"
 	"tokenflow/internal/chat"
 	"tokenflow/internal/config"
+	"tokenflow/internal/mobile"
 	"tokenflow/internal/proxy"
 	"tokenflow/internal/secret"
 	"tokenflow/internal/store"
@@ -42,6 +43,7 @@ func main() {
 	chatService := chat.NewService(st, box, cfg.InfoFlowBaseURL, cfg.ChatContextMaxRunes)
 	adminHandler.SetChatService(chatService)
 	accountHandler.SetChatService(chatService)
+	mobileHandler := mobile.New(st, chatService)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -61,6 +63,7 @@ func main() {
 
 	adminHandler.Register(r)
 	accountHandler.Register(r)
+	mobileHandler.Register(r)
 
 	r.Post("/v1/chat/completions", proxyHandler.OpenAIChat)
 	r.Get("/v1/models", proxyHandler.OpenAIModels)
@@ -125,7 +128,7 @@ var homeTemplate = template.Must(template.New("home").Parse(`<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{.Title}}</title>
-  <link rel="icon" href="/admin/static/tokenflow-logo.svg">
+  <link rel="icon" type="image/png" href="/admin/static/tokenflow-logo.png">
   <link rel="stylesheet" href="/admin/static/css/tokens.css">
   <link rel="stylesheet" href="/admin/static/css/base.css">
   <link rel="stylesheet" href="/admin/static/css/components.css">
@@ -137,7 +140,7 @@ var homeTemplate = template.Must(template.New("home").Parse(`<!doctype html>
   <header class="home-header">
     <div class="home-header-inner">
       <a class="home-brand" href="/" aria-label="{{.FullBrand}}">
-        <img src="/admin/static/tokenflow-logo.svg" alt="" aria-hidden="true">
+        <img src="/admin/static/tokenflow-logo.png" alt="" aria-hidden="true">
         <span><strong>{{.BrandName}}</strong><small>{{.GatewayLabel}}</small></span>
       </a>
       <a class="home-admin-link" href="/admin">
@@ -208,7 +211,7 @@ var homeTemplate = template.Must(template.New("home").Parse(`<!doctype html>
 
         <div class="route-core">
           <div class="route-core-brand">
-            <img src="/admin/static/tokenflow-logo.svg" alt="" aria-hidden="true">
+            <img src="/admin/static/tokenflow-logo.png" alt="" aria-hidden="true">
             <span><strong>{{.BrandName}}</strong><small>{{if .EnglishBrand}}{{.EnglishBrand}} · {{end}}{{.GatewayCore}}</small></span>
           </div>
           <ol class="route-steps">
@@ -253,7 +256,7 @@ var homeTemplate = template.Must(template.New("home").Parse(`<!doctype html>
 
       <div class="home-chat-preview" role="img" aria-label="{{.ChatPreviewLabel}}">
         <div class="home-chat-preview-side" aria-hidden="true">
-          <span class="home-chat-preview-brand"><img src="/admin/static/tokenflow-logo.svg" alt=""><strong>LLM Chat</strong></span>
+          <span class="home-chat-preview-brand"><img src="/admin/static/tokenflow-logo.png" alt=""><strong>LLM Chat</strong></span>
           <span class="home-chat-preview-new"><svg class="icon"><use href="/admin/static/icons.svg#icon-add"></use></svg>{{.ChatNewConversation}}</span>
           <span class="home-chat-preview-row active"><svg class="icon"><use href="/admin/static/icons.svg#icon-list"></use></svg>{{.ChatConversations}}</span>
         </div>
@@ -262,7 +265,7 @@ var homeTemplate = template.Must(template.New("home").Parse(`<!doctype html>
           <div class="home-chat-preview-body">
             <p class="home-chat-preview-user">{{.ChatPrompt}}</p>
             <div class="home-chat-preview-answer">
-              <img src="/admin/static/tokenflow-logo.svg" alt="">
+              <img src="/admin/static/tokenflow-logo.png" alt="">
               <div><span>{{.ChatRouteStatus}}</span><i></i><i></i><i></i></div>
             </div>
           </div>

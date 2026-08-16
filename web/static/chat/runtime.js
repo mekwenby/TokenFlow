@@ -81,8 +81,8 @@ export function chatViewportFrame({ viewportHeight, viewportOffsetTop = 0, basel
 }
 
 export function normalizeMaxToolCalls(value) {
-  const parsed = Number.parseInt(String(value ?? 6), 10);
-  if (!Number.isFinite(parsed)) return 6;
+  const parsed = Number.parseInt(String(value ?? 7), 10);
+  if (!Number.isFinite(parsed)) return 7;
   return Math.min(20, Math.max(0, parsed));
 }
 
