@@ -17,9 +17,6 @@ logs/
 node_modules/
 __pycache__/
 *.pyc
-android/.gradle/
-android/.kotlin/
-android/local.properties
 *.jks
 *.keystore
 *.p12

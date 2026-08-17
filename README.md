@@ -24,7 +24,6 @@
 - 普通用户可自助注册、登录、查看额度、管理自己的 API Key，并查看自己的请求记录。
 - 管理员和普通用户都可以使用内置 LLM Chat；聊天支持会话、模型选择、思考强度、自定义系统提示词、昵称，以及可选的网页搜索和 URL 读取工具。
 - 普通用户和管理员门户都支持安装为 Android PWA，分别默认打开 `/account/chat` 和 `/admin/chat`。
-- 提供完全本地运行的原生 Android Chat App，由用户自行配置 OpenAI Chat Completions、OpenAI Responses 或 Anthropic Messages 供应商；支持本地工作区、附件与视觉兜底、网页工具和 MiMo TTS，会话仅保存在设备上。
 - 使用 SQLite 存储，并在启动时自动迁移数据库结构。
 - 使用 AES-256-GCM 加密保存上游供应商 API 密钥。
 
@@ -72,16 +71,7 @@ go run ./cmd/server
 
 ## 原生 Android App
 
-原生 Kotlin + Jetpack Compose 工程位于 `android/`，应用名为“一念通流”，当前版本为 2.3.3（`versionCode 8`），支持 Android 8.0（API 26）及以上版本。App 不需要登录，不访问 TokenFlow 移动接口；供应商、模型、会话、消息、收藏、笔记、智能体和知识库均由 App 在本地管理。Release 继续使用外部 Android keystore 签名，不需要 `TOKENFLOW_BASE_URL`。
-
-当前版本支持三种模型协议的多轮流式聊天、会话分支/置顶/归档、图片和文档附件、系统相机 JPEG 75 压缩、模型视觉检测与兜底、Exa 搜索、InfoFlow/内置 URL 读取、Markdown/GFM 与安全内联 HTML、代码高亮，以及 MiMo 语音生成与 Media3 播放。语音自动播放事件只对发起生成时的会话页面实例有效，从笔记、收藏等页面返回不会重放旧语音。
-
-```powershell
-cd android
-.\gradlew.bat testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest
-```
-
-详细的供应商配置、Release 签名、加密导入导出和设备测试说明见 [`android/README.md`](android/README.md)。
+原生 Kotlin + Jetpack Compose App 已拆分为独立项目，不再包含在本 Go 网关/PWA 仓库中。本仓库继续保留服务端、网页端、Android PWA 和旧移动接口；原生 App 的源码、构建、签名、测试和发布资料由独立项目维护。
 
 维护现有 Go 后端/PWA 时，生产部署使用的 SSH 私钥路径为 `~/.ssh/LotusSSL`（Windows 通常为 `C:\Users\<用户名>\.ssh\LotusSSL`）。该私钥与 Android APK 签名 keystore 是两类不同凭据，均不得提交到仓库。
 

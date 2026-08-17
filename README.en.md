@@ -22,7 +22,6 @@ TokenFlow is a Go 1.21 LLM gateway that exposes OpenAI-compatible and Anthropic-
 - Consumer self-service for registration, login, quota review, personal API key management, and personal request logs.
 - Built-in LLM Chat for both admins and consumers, with conversations, model selection, thinking effort, custom system prompts, nicknames, and optional web search / URL reading tools.
 - Installable Android PWAs for consumer and admin portals, opening `/account/chat` and `/admin/chat` respectively.
-- A fully local native Android Chat app where users configure OpenAI Chat Completions, OpenAI Responses, or Anthropic Messages providers; it includes a local workspace, attachments and vision fallback, web tools, and MiMo TTS, while conversations stay on the device.
 - SQLite storage with automatic migrations.
 - AES-256-GCM encryption for upstream provider API keys.
 
@@ -70,16 +69,7 @@ Production deployments must use HTTPS for service worker registration and PWA in
 
 ## Native Android App
 
-The native Kotlin and Jetpack Compose project lives in `android/`. Version 2.3.3 (`versionCode 8`) supports Android 8.0 (API 26) and newer. It has no login and does not call TokenFlow mobile endpoints; providers, models, conversations, messages, bookmarks, notes, agents, and knowledge files are managed locally. Release builds still use the external Android signing keystore and do not require `TOKENFLOW_BASE_URL`.
-
-The current version supports multi-turn streaming across all three model protocols, conversation branching/pinning/archiving, image and document attachments, JPEG 75 system-camera capture, model vision tests and fallback, Exa search, InfoFlow/built-in URL reading, Markdown/GFM with safe inline HTML, syntax highlighting, and MiMo speech generation with Media3 playback. Speech auto-play events are scoped to the chat page instance that requested generation, so returning from notes, bookmarks, or another workspace page does not replay old audio.
-
-```powershell
-cd android
-.\gradlew.bat testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest
-```
-
-See [`android/README.md`](android/README.md) for provider setup, encrypted configuration transfer, release signing, APK paths, and device test requirements.
+The native Kotlin and Jetpack Compose App has moved to an independent project and is no longer included in this Go gateway/PWA repository. This repository continues to maintain the server, web applications, Android PWAs, and legacy mobile endpoints; native App source, build, signing, testing, and release documentation now belong to the independent project.
 
 Production maintenance of the existing Go backend/PWA uses the SSH private key at `~/.ssh/LotusSSL` (typically `C:\Users\<username>\.ssh\LotusSSL` on Windows). This SSH key is separate from the Android APK signing keystore; neither credential belongs in the repository.
 
